@@ -433,6 +433,18 @@ function mergeState(saved) {
   ['roles', 'cards', 'cardGroups', 'stickers', 'letters', 'moments', 'quizTemplates', 'userPatCards', 'taPatCards', 'periods', 'dailyReminders'].forEach(k => {
     if (!Array.isArray(out[k])) out[k] = [];
   });
+  /* 旧版日常提醒没有长期字段：补默认值（isLongTerm=false，startDate/endDate=date），保证区间判断统一 */
+  out.dailyReminders = out.dailyReminders.map(r => {
+    if (!r || typeof r !== 'object') return r;
+    if (r.isLongTerm === undefined) {
+      return Object.assign({}, r, {
+        isLongTerm: false,
+        startDate: r.startDate || r.date || '',
+        endDate: r.endDate !== undefined ? r.endDate : (r.date || '')
+      });
+    }
+    return r;
+  });
   /* 旧数据没有 cardGroups 字段时从空开始（不继承种子分组），由下方字卡迁移按旧 category 按需创建 */
   if (!Array.isArray(src.cardGroups)) out.cardGroups = [];
   /* 旧版拍一拍字卡库（若存在）整体迁移到「我的拍一拍字卡库」，不丢失 */
@@ -4186,7 +4198,7 @@ const APP_ICONS = {
   gomoku: '<svg viewBox="0 0 24 24"><rect x="3.4" y="3.4" width="17.2" height="17.2" rx="2.4"/><path d="M3.4 9.1h17.2M3.4 14.9h17.2M9.1 3.4v17.2M14.9 3.4v17.2"/><circle cx="9.1" cy="9.1" r="1.4" fill="currentColor" stroke="none"/><circle cx="14.9" cy="14.9" r="1.4"/></svg>',
   /* 桌面宠物：线条风小猫脸（双耳 + 眼睛 + 嘴 + 胡须） */
   pet: '<svg viewBox="0 0 24 24"><path d="M6.4 10.2 5 4.9a.7.7 0 0 1 1-.8l3.2 2.3M17.6 10.2 19 4.9a.7.7 0 0 0-1-.8l-3.2 2.3"/><path d="M12 6.1c-3.5 0-6.3 2.5-6.3 5.8 0 3.3 2.8 5.6 6.3 5.6s6.3-2.3 6.3-5.6c0-3.3-2.8-5.8-6.3-5.8Z"/><path d="M9.7 11.1v1M14.3 11.1v1M12 13.3v.9"/><path d="M10.7 15.3c.8.6 1.8.6 2.6 0M3.4 12.2l2.3.6M3.6 15l2.2-.4M20.6 12.2l-2.3.6M20.4 15l-2.2-.4"/></svg>',
-  settings: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.4v2.2M12 18.4v2.2M4.6 7.6l1.9 1.1M17.5 15.3l1.9 1.1M4.6 16.4l1.9-1.1M17.5 8.7l1.9-1.1"/></svg>',
+  settings: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
   phone: '<svg viewBox="0 0 24 24"><path d="M7.2 3.8h2.4l1.2 3.4-1.8 1.4a12 12 0 0 0 5.4 5.4l1.4-1.8 3.4 1.2v2.4a2 2 0 0 1-2.2 2A16.4 16.4 0 0 1 5.2 6a2 2 0 0 1 2-2.2Z"/></svg>',
   smile: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M8.6 14.4a4.4 4.4 0 0 0 6.8 0"/><circle cx="9.2" cy="9.8" r=".9"/><circle cx="14.8" cy="9.8" r=".9"/></svg>',
   /* 发图片：图片/相册/山峰样式，与留影的照相机图标明显区分 */
@@ -8303,10 +8315,26 @@ function periodAt(dateStr) {
   return null;
 }
 
-/* 取出某天的所有日常提醒（按时间排序） */
+/* 判断某条日常提醒在指定日期是否生效：
+   · 单次提醒（isLongTerm 为假）：date === dateStr
+   · 长期提醒：dateStr >= startDate 且（无截止 endDate === '' 或 dateStr <= endDate） */
+function reminderActiveOn(r, dateStr) {
+  if (!r) return false;
+  if (r.isLongTerm) {
+    const s = r.startDate || r.date || '';
+    const e = r.endDate || '';               /* 空字符串 = 长期/每天，无截止 */
+    if (!s) return false;
+    if (dateStr < s) return false;
+    if (e && dateStr > e) return false;
+    return true;
+  }
+  return r.date === dateStr;
+}
+
+/* 取出某天的所有日常提醒（含当天有效的长期提醒，按时间排序） */
 function remindersOn(dateStr) {
   return (state.dailyReminders || [])
-    .filter(r => r && r.date === dateStr)
+    .filter(r => reminderActiveOn(r, dateStr))
     .sort((a, b) => String(a.time).localeCompare(String(b.time)));
 }
 
@@ -8447,7 +8475,7 @@ function renderDailyBlock(dateStr) {
           <div class="rem-item-icon">${meta.icon}</div>
           <div class="rem-item-main">
             <div class="rem-item-time">${esc(r.time)}</div>
-            <div class="rem-item-type">${esc(r.typeLabel || meta.label || r.type)}</div>
+            <div class="rem-item-type">${esc(r.typeLabel || meta.label || r.type)}${r.isLongTerm ? '（长期）' : ''}</div>
           </div>
         </div>
         <button class="rem-del" data-rem-del="${r.id}" title="删除">✕</button>
@@ -8490,6 +8518,33 @@ function openReminderForm() {
           <label>栏目二 · 时间</label>
           <input class="rem-time-input" data-rt-input type="time" value="08:00">
         </div>
+        <!-- 栏目三 · 长期提醒开关 -->
+        <div class="rem-form-field">
+          <div class="rem-lt-row">
+            <label class="rem-lt-label">栏目三 · 长期提醒</label>
+            <span class="rem-switch">
+              <input type="checkbox" data-rl-toggle>
+              <i class="rem-switch-track"></i>
+            </span>
+          </div>
+          <div class="rem-lt-hint">开启后按日期范围每天提醒，可不设截止日期</div>
+        </div>
+        <!-- 单次日期（长期关闭时显示） -->
+        <div class="rem-form-field" data-rs-single>
+          <label>日期</label>
+          <input class="rem-time-input" data-rd-single type="date" value="${remSelDate}">
+        </div>
+        <!-- 日期范围（长期开启时显示） -->
+        <div class="rem-form-field rem-lt-range" data-rs-range style="display:none">
+          <label>开始日期</label>
+          <input class="rem-time-input" data-rd-start type="date" value="${remSelDate}">
+          <label class="rem-lt-sub">截止日期</label>
+          <input class="rem-time-input" data-rd-end type="date">
+          <label class="rem-noend-row">
+            <input type="checkbox" data-rd-noend>
+            <span>长期 / 每天（无截止）</span>
+          </label>
+        </div>
       </div>
       <div class="rem-form-foot">
         <button class="btn primary" data-rt-save disabled>保存</button>
@@ -8500,28 +8555,63 @@ function openReminderForm() {
   let selectedType = 'water';
   let customLabel = '';
 
+  const $q = sel => $(sel, overlay);
+
   const selectChip = key => {
     selectedType = key;
     $$('.rem-chip', overlay).forEach(c => c.classList.toggle('active', c.dataset.rt === key));
-    const customWrap = $('[data-rc-wrap]', overlay);
+    const customWrap = $q('[data-rc-wrap]');
     if (customWrap) customWrap.style.display = key === '__custom' ? 'block' : 'none';
     updateSaveBtn();
   };
+  const isLongTermOn = () => !!($q('[data-rl-toggle]') && $q('[data-rl-toggle]').checked);
+  const isNoEndOn = () => !!($q('[data-rd-noend]') && $q('[data-rd-noend]').checked);
   const isReady = () => {
-    const time = ($('[data-rt-input]', overlay).value || '').trim();
+    const time = ($q('[data-rt-input]').value || '').trim();
     if (!/^\d{1,2}:\d{2}$/.test(time)) return false;
-    if (selectedType === '__custom') return !!customLabel.trim();
-    return !!selectedType;
+    if (selectedType === '__custom' && !customLabel.trim()) return false;
+    if (!selectedType) return false;
+    /* 日期校验 */
+    if (isLongTermOn()) {
+      const s = ($q('[data-rd-start]').value || '').trim();
+      if (!s) return false;
+      if (!isNoEndOn()) {
+        const e = ($q('[data-rd-end]').value || '').trim();
+        if (!e || e < s) return false;   /* 截止不能早于开始 */
+      }
+    } else {
+      if (!($q('[data-rd-single]').value || '').trim()) return false;
+    }
+    return true;
   };
   const updateSaveBtn = () => {
-    const save = $('[data-rt-save]', overlay);
+    const save = $q('[data-rt-save]');
     if (save) save.disabled = !isReady();
+  };
+  /* 长期开关联动：开 → 隐藏单次日期、显示范围；关 → 反之 */
+  const syncLongTermUI = () => {
+    const on = isLongTermOn();
+    $q('[data-rs-single]').style.display = on ? 'none' : 'block';
+    $q('[data-rs-range]').style.display = on ? 'block' : 'none';
+    updateSaveBtn();
+  };
+  /* 无截止勾选联动：勾选 → 禁用截止日期输入 */
+  const syncNoEndUI = () => {
+    const end = $q('[data-rd-end]');
+    if (end) end.disabled = isNoEndOn();
+    updateSaveBtn();
   };
 
   $$('.rem-chip', overlay).forEach(btn => btn.addEventListener('click', () => selectChip(btn.dataset.rt)));
-  const customInput = $('[data-rc-input]', overlay);
+  const customInput = $q('[data-rc-input]');
   if (customInput) customInput.addEventListener('input', () => { customLabel = customInput.value; updateSaveBtn(); });
-  $('[data-rt-input]', overlay).addEventListener('input', updateSaveBtn);
+  $q('[data-rt-input]').addEventListener('input', updateSaveBtn);
+  $q('[data-rl-toggle]').addEventListener('change', syncLongTermUI);
+  $q('[data-rd-noend]').addEventListener('change', syncNoEndUI);
+  ['[data-rd-single]', '[data-rd-start]', '[data-rd-end]'].forEach(sel => {
+    const el = $q(sel);
+    if (el) el.addEventListener('input', updateSaveBtn);
+  });
 
   /* 取消：点遮罩 / ✕ / ESC */
   const close = () => { if (!remFormOpen) return; remFormOpen = false; overlay.remove(); };
@@ -8530,10 +8620,10 @@ function openReminderForm() {
   document.addEventListener('keydown', onKey, { once: true });
   function onKey(e) { if (e.key === 'Escape') close(); }
 
-  /* 保存 */
+  /* 保存：单次 → startDate = endDate = 单次日期；长期 → 保存范围（无截止存 ''） */
   $('[data-rt-save]', overlay).addEventListener('click', () => {
     if (!isReady()) return;
-    const time = ($('[data-rt-input]', overlay).value || '').trim();
+    const time = ($q('[data-rt-input]').value || '').trim();
     let type, typeLabel;
     if (selectedType === '__custom') {
       type = '__custom__';                          /* 特殊标记，渲染时用自定义文字 */
@@ -8542,13 +8632,28 @@ function openReminderForm() {
       type = selectedType;
       typeLabel = REMINDER_TYPES[selectedType].label;
     }
+    let isLongTerm, startDate, endDate, date;
+    if (isLongTermOn()) {
+      isLongTerm = true;
+      startDate = ($q('[data-rd-start]').value || '').trim();
+      endDate = isNoEndOn() ? '' : ($q('[data-rd-end]').value || '').trim();
+      date = startDate;                             /* 兼容旧字段：首发生日 */
+    } else {
+      isLongTerm = false;
+      startDate = ($q('[data-rd-single]').value || '').trim();
+      endDate = startDate;
+      date = startDate;
+    }
     state.dailyReminders = state.dailyReminders || [];
     state.dailyReminders.push({
       id: uid(),
       type,
       typeLabel,
-      date: remSelDate,
+      date,
       time,
+      isLongTerm,
+      startDate,
+      endDate,
       ts: Date.now()
     });
     persist();
@@ -8558,6 +8663,7 @@ function openReminderForm() {
   });
 
   selectChip('water');  /* 默认选中 water */
+  syncLongTermUI();     /* 初始化日期区显示 */
 }
 
 /* 绑定详情区按钮的事件（动态渲染后调用） */
@@ -8647,11 +8753,13 @@ function startReminderPolling() {
     const nowKey = remFmtDate(now.getFullYear(), now.getMonth(), now.getDate());
     const nowHM = pad2(now.getHours()) + ':' + pad2(now.getMinutes());
 
-    /* 日常提醒：精确匹配 HH:MM（每分钟触发一次，同分钟多次渲染也只弹一次） */
+    /* 日常提醒（含长期提醒）：今天处于生效区间且时间精确匹配 HH:MM 才触发；
+       去重 key 带 nowKey，长期提醒每天同一时间只弹一次 */
     (state.dailyReminders || []).forEach(r => {
-      if (r.date === nowKey && r.time === nowHM) {
-        const meta = REMINDER_TYPES[r.type] || { label: '提醒', icon: '⏰' };
-        notifyNow(`${meta.icon} ${meta.label}`, `${r.time} 到了，该${meta.label}啦`, 'daily-' + r.id + nowHM);
+      if (reminderActiveOn(r, nowKey) && r.time === nowHM) {
+        const meta = REMINDER_TYPES[r.type] || { label: r.typeLabel || '提醒', icon: '⏰' };
+        const label = r.typeLabel || meta.label;
+        notifyNow(`${meta.icon} ${label}`, `${r.time} 到了，该${label}啦`, 'daily-' + r.id + '-' + nowKey + '-' + nowHM);
       }
     });
 
@@ -11182,40 +11290,55 @@ function defaultLocationData() {
     updated: Date.now()
   };
 }
-/* 状态 / 正在做什么 文案池：随机刷新时抽取，尽量不连续重复 */
-const LOC_STATUS_POOL = [
-  '在附近', '在散步', '在回消息', '在窗边', '在远处', '在楼下',
-  '在路口', '在便利店', '在回家路上', '在你家附近', '在咖啡店', '在天台',
-  '在公园长椅上', '在书店门口', '在地铁站', '在街角等你', '在阳台吹风', '在灯下'
+/* 状态 / 正在做什么 词条库：按距离区间分桶，随机刷新时只从距离所属区间抽词，
+   保证文案与距离严格匹配（不再出现 0 米却在车站的错位） */
+const LOC_BUCKETS = [
+  {
+    /* 极近距离：0 ~ 5 米（含 0 米） */
+    min: 0, max: 5,
+    status: ['在你身边', '满眼都是你', '心跳加速'],
+    activity: ['看着你', '牵着你的手', '从背后抱着你', '听你说话', '帮你整理头发']
+  },
+  {
+    /* 近距离：6 ~ 100 米 */
+    min: 6, max: 100,
+    status: ['在附近', '想见你', '偷偷关注你'],
+    activity: ['在楼下等你', '在隔壁房间', '在小区门口散步', '买水喝', '正在走向你']
+  },
+  {
+    /* 中距离：101 ~ 300 米 */
+    min: 101, max: 300,
+    status: ['有点想你', '在忙', '挂念你'],
+    activity: ['在附近的咖啡店', '在超市买东西', '在街角散步', '在健身房锻炼']
+  },
+  {
+    /* 远距离：301 ~ 500 米 */
+    min: 301, max: 500,
+    status: ['在忙工作', '有些疲惫', '期待见面'],
+    activity: ['在公司上班', '在通勤的地铁上', '在车站等车', '在开会', '在见客户']
+  }
 ];
-const LOC_ACTIVITY_POOL = [
-  '在阳台看夜色，偶尔低头看手机',
-  '在便利店挑一杯热饮',
-  '在听你上次提到的那首歌',
-  '在翻我们的聊天记录',
-  '在路灯下停了一会儿',
-  '在往你家的方向走',
-  '在挑一件你觉得好看的外套',
-  '在排队买你爱吃的宵夜',
-  '在长椅上发呆，风有点凉',
-  '在数路过的猫，想起了你',
-  '在写下今天想对你说的话',
-  '在给手机充电，怕错过你的消息',
-  '在街角看橱窗里的灯',
-  '在慢慢走，故意绕了远路',
-  '在抬头找今晚的月亮',
-  '在等你先发来消息',
-  '在把外套的领子拉高一点',
-  '在车站看时刻表，想着要不要来找你'
-];
+/* 按距离找到所属区间桶（兜底返回最后一桶，即远距离） */
+function locBucketOf(distance) {
+  for (const b of LOC_BUCKETS) {
+    if (distance >= b.min && distance <= b.max) return b;
+  }
+  return LOC_BUCKETS[LOC_BUCKETS.length - 1];
+}
 function randomLocationData() {
-  /* 0~500 米：0 米（在你身边）按更高概率刷出 */
-  const near = Math.random() < 0.35;
+  /* 1. 先随机距离：0 ~ 500 米整数 */
+  const distance = randInt(0, 500);
+  /* 2. 按区间抽词：只从该距离所属桶中抽取状态与动态 */
+  const bucket = locBucketOf(distance);
+  let status = pickOne(bucket.status);
+  const activity = pickOne(bucket.activity);
+  /* 3. 特殊绑定：0 米 = 在你身边（强制覆盖状态），动态仍从极近桶抽取 */
+  if (distance === 0) status = '在你身边';
   return {
-    bearing: randInt(0, 359),
-    distance: near ? 0 : randInt(1, 500),
-    status: pickOne(LOC_STATUS_POOL),
-    activity: pickOne(LOC_ACTIVITY_POOL),
+    bearing: randInt(0, 359),   /* 方位角照常随机 */
+    distance,
+    status,
+    activity,
     updated: Date.now()
   };
 }
@@ -11343,7 +11466,7 @@ function renderLocationPage() {
     ${roleStripHTML(role.id)}
     <div class="panel" style="padding-top:4px">
       <div class="compass-box">${compassSVG(bearing)}</div>
-      <div style="text-align:center" class="muted">${esc(role.name)} ${esc(statusDisplay)}</div>
+      <div style="text-align:center" class="muted">${esc(role.name)} ${esc(loc.activity)}</div>
     </div>
     <div class="data-grid">
       <div class="data-cell"><div class="k">方位</div><div class="v">${esc(dir)}</div></div>
