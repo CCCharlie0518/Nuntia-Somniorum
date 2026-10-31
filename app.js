@@ -2,7 +2,7 @@
 'use strict';
 
 /* 全局版本号：显示在设置页最底部；日后发版只需改这一处 */
-const APP_VERSION = 'v7.5.1';
+const APP_VERSION = 'v7.6.0';
 
 /* =========================================================
  * 一、基础工具函数
@@ -4290,7 +4290,9 @@ const APP_ICONS = {
   /* 一起听：线条风耳机 */
   listen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><path d="M4 14a2 2 0 0 1 2-2h1v8H6a2 2 0 0 1-2-2Z"/><path d="M20 14a2 2 0 0 0-2-2h-1v8h1a2 2 0 0 0 2-2Z"/></svg>',
   /* 提醒：线条风铃铛 */
-  reminder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16v-5a6 6 0 1 0-12 0v5l-2 2h16Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>'
+  reminder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16v-5a6 6 0 1 0-12 0v5l-2 2h16Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>',
+  /* 检查更新：线条风循环刷新（尺寸与描边由 .app-update-btn svg 统一控制） */
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>'
 };
 
 const HOME_APPS = [
@@ -8483,9 +8485,16 @@ function renderSub(name) {
  * ========================================================= */
 let wcTimeTab = 'week';   /* today 今日 / week 本周 / month 本月，默认本周 */
 let wcWhoTab = 'ta';      /* ta TA说的 / me 我说的，默认 TA 说的 */
+let wcRoleId = null;      /* 进入词云页时锁定的梦角 id，切换筛选时保持不变 */
 
-/* 硬停用单字（的、了、是、在、这、那、就等虚词/语气词）：直接作为切分点，绝不出现在词内 */
-const WC_HARD_CHARS = '的了是在这那就也都还和跟与或但而啊呀吧呢嘛么哦嗯不没很太最更之着过们个于把被让给对向从又再先只已为且即却若虽及并所如同比等每各别另';
+/* ===== 超级分割正则：一切空白 + 中英文标点 + 常见特殊符号，全部作为最高优先级分割线 =====
+ * 覆盖：半角/全角空格、换行 \n \r、制表符 \t、垂直制表符 \v、换页符 \f、不换行空格 \u00A0、全角空格 \u3000、
+ * 中英文逗号句号问号感叹号顿号分号冒号、中英文引号、圆括号方括号、中文书名号/直角引号、波浪号、破折号、
+ * 下划线、加号、星号、等号、与号、井号、at 符、￥$%^、省略号 …… 等 */
+const WC_SPLIT_RE = /[ \n\r\t\v\f\u00A0\u3000，。！？、,.!?;；:："'“”‘’（）()\[\]【】《》〈〉「」『』<>~～\-—_+*=&#@￥$%^…|\/\\]+/;
+
+/* 停用单字（虚词/语气词/高频代词）：既作为切分点，也用于剔除全由虚词组成的词 */
+const WC_HARD_CHARS = '的了是在这那就也都还和跟与或但而啊呀吧呢嘛么哦嗯吗嘛呢啥不没很太最更之着过们个于把被让给对向从又再先只已为且即却若虽及并所如同比等每各别另您咱';
 const WC_HARD_RE = new RegExp('[' + WC_HARD_CHARS + ']+');
 /* 软停用单字（人称代词）：可以成词（想你/陪我），但全由代词组成的词（如"我你"）无意义 */
 const WC_STOP_SOFT = new Set('我你他她它'.split(''));
@@ -8494,7 +8503,8 @@ const WC_STOP_PHRASES = new Set([
   '什么', '怎么', '怎样', '为什么', '这个', '那个', '就是', '不是', '没有', '没什么',
   '还是', '还有', '一个', '一些', '可以', '可能', '应该', '因为', '所以', '但是',
   '然后', '现在', '知道', '觉得', '这样', '那样', '真的', '时候', '东西', '事情',
-  '一下', '一点', '有点', '不会', '不能', '不要', '不用', '没事', '这么', '那么', '已经'
+  '一下', '一点', '有点', '不会', '不能', '不要', '不用', '没事', '这么', '那么', '已经',
+  '我们', '你们', '他们', '她们', '咱们', '自己', '大家', '这个', '那个', '一个'
 ]);
 
 /* 判断候选词是否为停用词（显式命中，或全部由人称代词组成） */
@@ -8504,47 +8514,138 @@ function wcIsStopWord(w) {
   return true;
 }
 
+/* 片段清洗：超级分割后，剔除数字、字母、emoji、残留符号，只保留汉字；
+ * 结果为空说明是纯数字/纯符号/纯表情，直接丢弃 */
+function wcCleanFragment(frag) {
+  return String(frag == null ? '' : frag).replace(/[^\u4e00-\u9fa5]/g, '').trim();
+}
+
+/* 从字卡库提取 2~6 字的常用短语词典，用于长句（>6 字）的核心词匹配 */
+function wcBuildDict() {
+  const dict = new Set();
+  const collect = content => {
+    String(content || '').split(WC_SPLIT_RE).forEach(piece => {
+      const clean = wcCleanFragment(piece);
+      if (!clean) return;
+      if (clean.length <= 6) {
+        if (clean.length >= 2 && !wcIsStopWord(clean)) dict.add(clean);
+        return;
+      }
+      /* 字卡里的长句同样按停用字切分，只留 2~6 字的核心短语 */
+      clean.split(WC_HARD_RE).forEach(part => {
+        if (part.length >= 2 && part.length <= 6 && !wcIsStopWord(part)) dict.add(part);
+      });
+    });
+  };
+  (state.cards || []).forEach(c => { if (c && c.enabled !== false) collect(c.content); });
+  (state.userPatCards || []).forEach(c => { if (c && c.enabled !== false) collect(c.content); });
+  (state.taPatCards || []).forEach(c => { if (c && c.enabled !== false) collect(c.content); });
+  return dict;
+}
+
+/* 长句核心词匹配：在片段内做「最长匹配」扫描，命中词卡库短语就计一次；
+ * 返回 true 表示至少命中一个，避免再做滑窗噪声 */
+function wcExtractLong(frag, dict, add) {
+  let i = 0, hits = 0;
+  while (i < frag.length) {
+    let hit = '';
+    for (let len = Math.min(6, frag.length - i); len >= 2; len--) {
+      const cand = frag.slice(i, i + len);
+      if (dict.has(cand)) { hit = cand; break; }
+    }
+    if (hit) { add(hit); hits++; i += hit.length; }
+    else i += 1;
+  }
+  return hits > 0;
+}
+
+/* 长句兜底：字卡库匹配不到时，按停用字切分，再用 2~4 字滑窗提取核心词 */
+function wcFallbackLong(frag, add) {
+  frag.split(WC_HARD_RE).forEach(part => {
+    if (part.length < 2) return;
+    if (part.length <= 6) { add(part); return; }
+    for (let size = 2; size <= 4; size++)
+      for (let i = 0; i + size <= part.length; i++) add(part.slice(i, i + size));
+  });
+}
+
+/* 消息时间戳归一化为毫秒：
+ * 兼容 ts / timestamp / time 三种字段名；数字按「小于 1e11 视为秒」自动换算；
+ * 字符串支持 "2026-10-31 15:00" 这类日期文本（老存档/导入数据常见） */
+function wcMsgTs(m) {
+  let raw = m.ts != null ? m.ts : (m.timestamp != null ? m.timestamp : m.time);
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw < 1e11 ? raw * 1000 : raw;
+  if (typeof raw === 'string' && raw.trim()) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n < 1e11 ? n * 1000 : n;
+    const t = new Date(raw.replace(/-/g, '/')).getTime();   /* iOS 不支持 "yyyy-mm-dd hh:mm"，换成斜杠 */
+    if (Number.isFinite(t)) return t;
+  }
+  return 0;
+}
+
+/* 消息发送方归一化：聊天里真正落库的是 role:'user' / 'dream'，
+ * sender 字段只有部分类型（转账、礼物）才带，所以必须按 role 兜底，否则会一条都匹配不到 */
+function wcMsgSender(m) {
+  if (m.sender === 'user' || m.sender === 'ta') return m.sender;
+  if (m.who === 'me') return 'user';
+  if (m.role === 'user') return 'user';
+  if (m.role === 'system') return '';        /* 系统提示不参与统计 */
+  return 'ta';
+}
+
 /* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容 */
 function wcCollectTexts(roleId, timeTab, whoTab) {
   const list = state.chats[roleId] || [];
   const DAY = 24 * 60 * 60 * 1000;
+  const now = Date.now();
   let start = 0;
   if (timeTab === 'today') {
     const d = new Date(); d.setHours(0, 0, 0, 0); start = d.getTime();
   } else if (timeTab === 'week') {
-    start = Date.now() - 7 * DAY;
+    start = now - 7 * DAY;
   } else if (timeTab === 'month') {
-    start = Date.now() - 30 * DAY;
+    start = now - 30 * DAY;
   }
   const wantSender = whoTab === 'ta' ? 'ta' : 'user';
   return list.filter(m => {
     if (!m || m.recalled) return false;
     /* 只统计普通文字气泡：转账/礼物/表情/通话/问卷等带 type 的消息不参与 */
     if (m.type && m.type !== 'text') return false;
-    if (m.sender !== wantSender) return false;
+    if (wcMsgSender(m) !== wantSender) return false;
     if (!m.content || !String(m.content).trim()) return false;
-    return (m.ts || 0) >= start;
+    const ts = wcMsgTs(m);
+    return ts > 0 && ts >= start && ts <= now + 60 * 1000;   /* 允许 1 分钟时钟误差 */
   }).map(m => String(m.content));
 }
 
-/* 轻量中文词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15]] 格式 */
+/* 轻量中文词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15]] 格式
+ * 流程：超级正则切分 → 片段清洗（去数字/字母/emoji/符号）→
+ *       2~6 字整段成词；>6 字先查字卡库核心词，查不到再停用字切分 + 滑窗 */
 function wcBuildList(texts) {
   const freq = Object.create(null);
-  const add = w => { freq[w] = (freq[w] || 0) + 1; };
+  const add = w => {
+    const word = String(w || '');
+    if (word.length < 2 || wcIsStopWord(word)) return;
+    freq[word] = (freq[word] || 0) + 1;
+  };
+  const dict = wcBuildDict();
+
   texts.forEach(t => {
-    /* 非中文字符（标点、空白、emoji、字母、数字）一律视为分隔 */
-    String(t || '').split(/[^一-龥]+/).forEach(seg => {
-      /* 再按硬停用字二次切分：虚词成为天然词边界，从源头消除"刚还""的消"这类跨界噪声 */
-      seg.split(WC_HARD_RE).forEach(frag => {
-        const n = frag.length;
-        if (n < 2) return;
-        if (n <= 4) { add(frag); return; }         /* 短片段整体成词，不产生滑窗噪声 */
-        for (let size = 2; size <= 4; size++)      /* 长片段才用滑窗提取 2~4 字词组 */
-          for (let i = 0; i + size <= n; i++) add(frag.slice(i, i + size));
-      });
+    /* ① 空格、换行、制表符、全部中英文标点与特殊符号 → 一刀切
+       这样绝不可能出现跨行、跨空格、跨标点的连词 */
+    String(t || '').split(WC_SPLIT_RE).forEach(piece => {
+      /* ② 清洗：只保留汉字，纯数字 / 纯符号 / 纯表情片段会变成空串被丢弃 */
+      const clean = wcCleanFragment(piece);
+      if (!clean || clean.length < 2) return;
+      /* ③ 2~6 字的自然短语（晚安 / 做个好梦 / 抱抱你）直接计数 */
+      if (clean.length <= 6) { add(clean); return; }
+      /* ④ 超过 6 字的长句：优先匹配字卡库核心短语，匹配不到再兜底切分 */
+      if (!wcExtractLong(clean, dict, add)) wcFallbackLong(clean, add);
     });
   });
-  let arr = Object.keys(freq).map(w => [w, freq[w]]).filter(([w]) => !wcIsStopWord(w));
+
+  let arr = Object.keys(freq).map(w => [w, freq[w]]);
   arr.sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);  /* 频次降序，同频长词优先 */
   /* 候选足够多时丢弃只出现 1 次的长尾噪声 */
   if (arr.length > 40) arr = arr.filter(([, c]) => c >= 2);
@@ -8563,7 +8664,11 @@ function renderWordCloudPage() {
   /* 每次从快捷菜单进入都恢复默认筛选：本周 + TA说的 */
   wcTimeTab = 'week';
   wcWhoTab = 'ta';
-  const roleId = state.activeRoleId;
+  /* 词云统计的梦角：优先取来源聊天页的角色（返回栈栈顶就是聊天页路由），
+     兜底才用当前会话角色，避免多梦角时统计到别人的聊天记录 */
+  const back = routeStack.length ? routeStack[routeStack.length - 1] : null;
+  wcRoleId = (back && back.roleId) || state.activeRoleId;
+  const roleId = wcRoleId;
   const dn = taName(roleId);
   const body = subShell('互动词云', `
     <div class="wc-tabs">
@@ -8579,6 +8684,7 @@ function renderWordCloudPage() {
       <canvas id="wordcloud-canvas" style="width: 100%; height: 400px;"></canvas>
       <div class="wc-empty hidden" id="wcEmpty"></div>
     </div>
+    <div class="wc-rank hidden" id="wcRank"></div>
     <div class="wc-tip muted">统计与 ${esc(dn)} 的聊天文字内容，已自动过滤标点与常用虚词</div>
   `);
   $$('[data-wctime]', body).forEach(btn => btn.addEventListener('click', () => {
@@ -8602,48 +8708,87 @@ function drawWordCloud() {
   const canvas = $('#wordcloud-canvas');
   if (!canvas) return;
   const emptyEl = $('#wcEmpty');
-  const dn = taName(state.activeRoleId);
+  const dn = taName(wcRoleId || state.activeRoleId);
+  const rankEl = $('#wcRank');
   const showEmpty = msg => {
     canvas.style.display = 'none';
     if (emptyEl) { emptyEl.textContent = msg; emptyEl.classList.remove('hidden'); }
+    if (rankEl) { rankEl.classList.add('hidden'); rankEl.innerHTML = ''; }
   };
+
+  /* 有数据时的显隐切换：先恢复可见，再量尺寸，最后绘制 */
+  const showCanvas = () => {
+    canvas.style.display = 'block';
+    if (emptyEl) emptyEl.classList.add('hidden');
+  };
+
+  /* ① 库兜底：wordcloud2.js 未加载成功时给出友好提示 */
   if (typeof WordCloud !== 'function') {
     showEmpty('词云组件加载失败，请检查网络后重新进入');
     return;
   }
-  const list = wcBuildList(wcCollectTexts(state.activeRoleId, wcTimeTab, wcWhoTab));
+
+  /* ② 取数 + 词频统计（数组格式 [['词语', 频次], ...]） */
+  const texts = wcCollectTexts(wcRoleId || state.activeRoleId, wcTimeTab, wcWhoTab);
+  const list = wcBuildList(texts);
   if (!list.length) {
-    showEmpty('这段时间还没有可统计的聊天文字，先去和 ' + dn + ' 说说话吧');
+    showEmpty(texts.length
+      ? '这段时间的文字内容太少，暂时提取不出关键词，再多聊几句试试'
+      : '这段时间还没有可统计的聊天文字，先去和 ' + dn + ' 说说话吧');
     return;
   }
-  canvas.style.display = '';
-  if (emptyEl) emptyEl.classList.add('hidden');
-  /* backing store 按元素实际尺寸 × 设备像素比设置，高分屏下文字才不糊 */
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.clientWidth || 300;
+
+  /* ③ 渲染前保证 canvas 可见且有实际尺寸（之前隐藏过会导致宽高为 0，画出来是空白） */
+  showCanvas();
+  let cssW = canvas.clientWidth;
+  if (!cssW) {
+    const stage = canvas.parentElement;
+    cssW = (stage && stage.clientWidth ? stage.clientWidth - 16 : 0) || 300;
+  }
   const cssH = 400;
-  canvas.width = Math.round(cssW * dpr);
-  canvas.height = Math.round(cssH * dpr);
-  WordCloud(canvas, {
-    list,
-    gridSize: Math.max(4, Math.round(8 * dpr)),
-    weightFactor: function (count) {
-      /* 按词频放大字号，最小 14px、最大不超过 50px（CSS 像素），再乘 dpr */
-      return Math.min(50, Math.max(14, count * 4)) * dpr;
-    },
-    fontFamily: 'sans-serif',
-    fontWeight: 600,
-    color: function () {
-      /* 主题蓝 + 低饱和糖果色随机 */
-      const colors = ['#007AFF', '#FF6B81', '#A29BFE', '#55E6C1', '#FDCB6E'];
-      return colors[Math.floor(Math.random() * colors.length)];
-    },
-    backgroundColor: 'transparent',
-    rotateRatio: 0.3,       /* 少量词允许旋转，排版更活泼 */
-    shuffle: false,         /* 高频词优先落在中心 */
-    drawOutOfBound: false,
-    shrinkToFit: true
-  });
+  const dpr = window.devicePixelRatio || 1;
+  /* 重置 backing store：同时清空上一轮绘制的残留，高分屏下文字也不糊 */
+  canvas.width = Math.max(1, Math.round(cssW * dpr));
+  canvas.height = Math.max(1, Math.round(cssH * dpr));
+
+  /* 底部排行榜：与词云共用同一份词频数组，取前 10 名 */
+  if (rankEl) {
+    const top = list.slice(0, 10);
+    rankEl.innerHTML = `<div class="wc-rank-title">高频词 TOP ${top.length}</div>`
+      + top.map(([w, n], i) => `<div class="wc-rank-row">
+          <span class="wc-rank-no">${i + 1}</span>
+          <span class="wc-rank-word">${esc(w)}</span>
+          <span class="wc-rank-count">${n} 次</span>
+        </div>`).join('');
+    rankEl.classList.remove('hidden');
+  }
+
+  /* ④ try-catch 包裹渲染，库内部异常时只提示、不白屏 */
+  try {
+    WordCloud(canvas, {
+      list,
+      gridSize: Math.max(4, Math.round(8 * dpr)),
+      weightFactor: function (count) {
+        /* 按词频放大字号，最小 14px、最大不超过 50px（CSS 像素），再乘 dpr */
+        return Math.min(50, Math.max(14, count * 4)) * dpr;
+      },
+      fontFamily: 'sans-serif',
+      fontWeight: 600,
+      color: function () {
+        /* 主题蓝 + 低饱和糖果色随机 */
+        const colors = ['#007AFF', '#FF6B81', '#A29BFE', '#55E6C1', '#FDCB6E'];
+        return colors[Math.floor(Math.random() * colors.length)];
+      },
+      backgroundColor: 'transparent',
+      rotateRatio: 0.3,       /* 少量词允许旋转，排版更活泼 */
+      shuffle: false,         /* 高频词优先落在中心 */
+      drawOutOfBound: false,
+      shrinkToFit: true
+    });
+  } catch (err) {
+    console.error('[互动词云] 渲染失败：', err);
+    showEmpty('词云渲染出错了，换个筛选条件再试试');
+  }
 }
 
 /* =========================================================
@@ -12814,10 +12959,14 @@ function renderSettingsPage() {
       ${esc(state.appName)} · 本地持久化 + 导出备份<br>
       所有数据只保存在当前浏览器中，不会上传；更换设备或清理浏览器数据前请先导出备份。
     </div>
+    <button class="app-update-btn" id="appUpdateBtn" type="button">${APP_ICONS.refresh}<span>检查更新</span></button>
     <div id="app-version-display" class="app-version-text"></div>`);
 
   /* 版本号显示：内容来自文件顶部全局常量 APP_VERSION */
   $('#app-version-display', body).textContent = '当前版本：' + APP_VERSION;
+
+  /* 检查更新：只弹二次确认，确认后才清理缓存并强制刷新 */
+  $('#appUpdateBtn').addEventListener('click', openUpdateConfirm);
 
   $('#editMe').addEventListener('click', openMyProfileEditor);
   $('#settingsAddRole').addEventListener('click', () => openRoleEditor(null));
@@ -12929,6 +13078,105 @@ function renderSettingsPage() {
   $$('[data-sentry]').forEach(row => row.addEventListener('click', () => {
     navigate({ page: 'sub', name: row.dataset.sentry });
   }));
+}
+
+/* =========================================================
+ * 二十三·一、检查更新（设置页最底部的「检查更新」按钮）
+ * 流程：点击 → 全屏二次确认弹窗 → 确认后注销 Service Worker、
+ *       清空 CacheStorage → 500ms 兜底延迟 → 带最新时间戳强制刷新
+ * 弹窗 DOM 固定在 index.html 的 #updateConfirmMask，这里只处理交互
+ * ========================================================= */
+function openUpdateConfirm() {
+  const mask = $('#updateConfirmMask');
+  if (!mask) return;
+  mask.classList.remove('hidden');
+  /* 先取消隐藏再置 show，保证淡入过渡生效 */
+  requestAnimationFrame(() => mask.classList.add('show'));
+}
+
+function closeUpdateConfirm() {
+  const mask = $('#updateConfirmMask');
+  if (!mask) return;
+  mask.classList.remove('show');
+  /* 等淡出动画结束再彻底隐藏，避免下一帧就消失显得生硬 */
+  setTimeout(() => mask.classList.add('hidden'), 180);
+}
+
+/* 确定更新：按钮改文案并禁用 → 写入刷新标记 → 后台清理缓存 → 500ms 后强制刷新 */
+function startUpdateRefresh() {
+  const btn = $('#appUpdateBtn');
+  if (btn) {
+    btn.disabled = true;
+    const label = btn.querySelector('span');
+    if (label) label.textContent = '正在获取最新版本...';
+  }
+
+  /* 刷新标记：刷新后由 checkUpdateResult() 读取，用于判断并弹出更新结果提示 */
+  try { sessionStorage.setItem('is_checking_update', 'true'); } catch (err) { /* 隐私模式下可能不可用，忽略 */ }
+
+  /* 兜底刷新：即使下面的清理逻辑卡住或报错，500ms 后也一定带时间戳刷新 */
+  setTimeout(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('t', Date.now());   /* 覆盖旧的 t 参数，强制绕过浏览器 / PWA 缓存 */
+    window.location.replace(url.toString());
+  }, 500);
+
+  (async () => {
+    /* ① 注销 Service Worker（PWA 缓存是“改了代码却还是旧版”的常见原因） */
+    if ('serviceWorker' in navigator) {
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.unregister()));
+      } catch (err) { console.warn('[检查更新] 注销 Service Worker 失败：', err); }
+    }
+    /* ② 清空 CacheStorage：遍历所有缓存版本一次性删除 */
+    if (typeof caches !== 'undefined' && caches && typeof caches.keys === 'function') {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      } catch (err) { console.warn('[检查更新] 清理缓存失败：', err); }
+    }
+  })();
+}
+
+/* 弹窗按钮只绑一次（boot 时调用）：取消中断，确定更新才执行清理与刷新 */
+function bindUpdateFeature() {
+  const mask = $('#updateConfirmMask');
+  if (!mask) return;
+  const cancelBtn = $('#updCancel');
+  const okBtn = $('#updOk');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeUpdateConfirm);
+  if (okBtn) okBtn.addEventListener('click', () => { closeUpdateConfirm(); startUpdateRefresh(); });
+  /* 点遮罩空白处等同取消，与全局弹窗习惯保持一致 */
+  mask.addEventListener('click', e => { if (e.target === mask) closeUpdateConfirm(); });
+}
+
+/* 检查更新专用 Toast：复用全局 #toast 的黑底白字圆角样式，额外居中显示 */
+function showUpdateToast(text) {
+  const el = $('#toast');
+  if (!el) return;
+  el.classList.add('toast-center');
+  showToast(text);
+  /* 提示结束后摘掉居中标记，不影响后续其它普通 Toast 的位置 */
+  setTimeout(() => el.classList.remove('toast-center'), 2200);
+}
+
+/* 刷新后的结果判断：只有从「确定更新」跳转回来时（sessionStorage 有标记）才提示
+ * 记录上一次版本号 → 与本次 APP_VERSION 对比 → 提示结果 → 写入本次版本号 */
+function checkUpdateResult() {
+  let flag = null;
+  try { flag = sessionStorage.getItem('is_checking_update'); } catch (err) { flag = null; }
+  if (flag !== 'true') return;                       /* 普通刷新 / 重启不提示 */
+  try { sessionStorage.removeItem('is_checking_update'); } catch (err) { /* 忽略 */ }
+
+  let saved = null;
+  try { saved = localStorage.getItem('saved_app_version'); } catch (err) { saved = null; }
+  const isNewVersion = saved !== APP_VERSION;        /* 与上次记录不同 = 拉到了新版本 */
+
+  /* 延迟到首屏渲染与路由稳定后再弹，避免被页面切换动画遮住 */
+  setTimeout(() => showUpdateToast(isNewVersion ? '已更新到新版本！' : '当前已是最新版本'), 600);
+
+  try { localStorage.setItem('saved_app_version', APP_VERSION); } catch (err) { /* 忽略 */ }
 }
 
 function avatarEditorHTML(value) {
@@ -14460,10 +14708,12 @@ async function boot() {
   musicBindInputs();    /* 绑定 index.html 中的隐藏音频 / 图片选择器 */
   applyTheme();
   bindGlobalEvents();
+  bindUpdateFeature();  /* 检查更新：二次确认弹窗按钮只绑一次 */
   rdBindGlobal();       /* 一起读书：悬浮小聊天框与引用按钮的事件只绑一次 */
   routeStack = [];
   currentRoute = { page: 'home' };
   applyRoute();
+  checkUpdateResult();  /* 检查更新：如果是「确定更新」后的刷新，弹出版本结果提示 */
 
   if (saved) persist(true);
   scheduleIncoming();

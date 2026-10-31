@@ -46,7 +46,19 @@
   <div id="stickerSheet" class="sticker-sheet"></div>
 </div>
 <div id="modalRoot"></div>
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<!-- 检查更新：二次确认弹窗（默认隐藏，层级高于全部既有浮层，由 app.js 打开/关闭） -->
+<div class="upd-mask hidden" id="updateConfirmMask">
+  <div class="upd-card" role="dialog" aria-modal="true" aria-labelledby="updTitle">
+    <div class="upd-title" id="updTitle">检查更新</div>
+    <div class="upd-text">更新前建议先前往【存储感知】导出备份，以防数据丢失。确定要拉取最新版本吗？</div>
+    <div class="upd-actions">
+      <button class="upd-btn cancel" id="updCancel" type="button">取消</button>
+      <button class="upd-btn ok" id="updOk" type="button">确定更新</button>
+    </div>
+  </div>
+</div>
 
 <!-- 一起读书：悬浮小聊天框（默认隐藏，进入阅读界面时显示，退出时隐藏并清空） -->
 <div class="rd-fchat hidden" id="rdFChat">
