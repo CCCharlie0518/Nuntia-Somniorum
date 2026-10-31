@@ -8486,12 +8486,18 @@ function renderSub(name) {
 let wcTimeTab = 'week';   /* today 今日 / week 本周 / month 本月，默认本周 */
 let wcWhoTab = 'ta';      /* ta TA说的 / me 我说的，默认 TA 说的 */
 let wcRoleId = null;      /* 进入词云页时锁定的梦角 id，切换筛选时保持不变 */
+let wcRenderSeq = 0;      /* 渲染序号：快速切换筛选时，旧的延迟渲染任务自动作废，避免重复叠画卡死 */
 
 /* ===== 超级分割正则：一切空白 + 中英文标点 + 常见特殊符号，全部作为最高优先级分割线 =====
  * 覆盖：半角/全角空格、换行 \n \r、制表符 \t、垂直制表符 \v、换页符 \f、不换行空格 \u00A0、全角空格 \u3000、
  * 中英文逗号句号问号感叹号顿号分号冒号、中英文引号、圆括号方括号、中文书名号/直角引号、波浪号、破折号、
  * 下划线、加号、星号、等号、与号、井号、at 符、￥$%^、省略号 …… 等 */
 const WC_SPLIT_RE = /[ \n\r\t\v\f\u00A0\u3000，。！？、,.!?;；:："'“”‘’（）()\[\]【】《》〈〉「」『』<>~～\-—_+*=&#@￥$%^…|\/\\]+/;
+
+/* 防卡死硬限制：单条消息最大处理字符数 / 单个片段最大扫描长度 / 全部文本总字符预算 */
+const WC_MAX_TEXT_LEN = 5000;
+const WC_MAX_FRAG_LEN = 400;
+const WC_MAX_TOTAL_CHARS = 20000;
 
 /* 停用单字（虚词/语气词/高频代词）：既作为切分点，也用于剔除全由虚词组成的词 */
 const WC_HARD_CHARS = '的了是在这那就也都还和跟与或但而啊呀吧呢嘛么哦嗯吗嘛呢啥不没很太最更之着过们个于把被让给对向从又再先只已为且即却若虽及并所如同比等每各别另您咱';
@@ -8524,7 +8530,8 @@ function wcCleanFragment(frag) {
 function wcBuildDict() {
   const dict = new Set();
   const collect = content => {
-    String(content || '').split(WC_SPLIT_RE).forEach(piece => {
+    /* 超长字卡同样截断，避免建词典阶段就消耗过多内存与时间 */
+    String(content || '').slice(0, WC_MAX_TEXT_LEN).split(WC_SPLIT_RE).forEach(piece => {
       const clean = wcCleanFragment(piece);
       if (!clean) return;
       if (clean.length <= 6) {
@@ -8546,13 +8553,16 @@ function wcBuildDict() {
 /* 长句核心词匹配：在片段内做「最长匹配」扫描，命中词卡库短语就计一次；
  * 返回 true 表示至少命中一个，避免再做滑窗噪声 */
 function wcExtractLong(frag, dict, add) {
-  let i = 0, hits = 0;
-  while (i < frag.length) {
+  let i = 0, hits = 0, guard = 0;
+  const MAX_STEP = 4000;   /* 硬上限：哪怕出现异常数据也不会无限打转 */
+  while (i < frag.length && guard < MAX_STEP) {
+    guard++;
     let hit = '';
     for (let len = Math.min(6, frag.length - i); len >= 2; len--) {
       const cand = frag.slice(i, i + len);
       if (dict.has(cand)) { hit = cand; break; }
     }
+    /* 命中就跳过整个词（至少 2 字），未命中必须强制前进 1 位，绝不原地踏步 */
     if (hit) { add(hit); hits++; i += hit.length; }
     else i += 1;
   }
@@ -8564,8 +8574,10 @@ function wcFallbackLong(frag, add) {
   frag.split(WC_HARD_RE).forEach(part => {
     if (part.length < 2) return;
     if (part.length <= 6) { add(part); return; }
+    /* 超长部分先截断，滑窗只处理前 400 字，避免生成海量候选把内存撑爆 */
+    const p = part.length > WC_MAX_FRAG_LEN ? part.slice(0, WC_MAX_FRAG_LEN) : part;
     for (let size = 2; size <= 4; size++)
-      for (let i = 0; i + size <= part.length; i++) add(part.slice(i, i + size));
+      for (let i = 0; i + size <= p.length; i++) add(p.slice(i, i + size));
   });
 }
 
@@ -8626,22 +8638,29 @@ function wcBuildList(texts) {
   const freq = Object.create(null);
   const add = w => {
     const word = String(w || '');
-    if (word.length < 2 || wcIsStopWord(word)) return;
+    if (!word || word.length < 2 || wcIsStopWord(word)) return;
     freq[word] = (freq[word] || 0) + 1;
   };
   const dict = wcBuildDict();
+  let budget = WC_MAX_TOTAL_CHARS;   /* 总字符预算：多条超长消息叠加也不会拖死主线程 */
 
   texts.forEach(t => {
+    if (budget <= 0) return;
+    let raw = String(t || '');
+    /* 单条消息硬截断：防止一条几万字的文本把内存撑爆 */
+    if (raw.length > WC_MAX_TEXT_LEN) raw = raw.slice(0, WC_MAX_TEXT_LEN);
+    budget -= raw.length;
     /* ① 空格、换行、制表符、全部中英文标点与特殊符号 → 一刀切
        这样绝不可能出现跨行、跨空格、跨标点的连词 */
-    String(t || '').split(WC_SPLIT_RE).forEach(piece => {
+    raw.split(WC_SPLIT_RE).forEach(piece => {
       /* ② 清洗：只保留汉字，纯数字 / 纯符号 / 纯表情片段会变成空串被丢弃 */
       const clean = wcCleanFragment(piece);
       if (!clean || clean.length < 2) return;
       /* ③ 2~6 字的自然短语（晚安 / 做个好梦 / 抱抱你）直接计数 */
       if (clean.length <= 6) { add(clean); return; }
-      /* ④ 超过 6 字的长句：优先匹配字卡库核心短语，匹配不到再兜底切分 */
-      if (!wcExtractLong(clean, dict, add)) wcFallbackLong(clean, add);
+      /* ④ 超过 6 字的长句：先截断到安全长度，再查字卡库，查不到才兜底切分 */
+      const frag = clean.length > WC_MAX_FRAG_LEN ? clean.slice(0, WC_MAX_FRAG_LEN) : clean;
+      if (!wcExtractLong(frag, dict, add)) wcFallbackLong(frag, add);
     });
   });
 
@@ -8657,6 +8676,23 @@ function wcBuildList(texts) {
     if (picked.length >= 60) break;
   }
   return picked;
+}
+
+/* 渲染前数据清洗（词云库与排行榜共用）：
+ * 只接受 [['词语', 正数频次], ...] 的数组格式，剔除空词、NaN / undefined / null / 非正数频次，
+ * 按频次降序后最多取 60 个 —— 词数过多或格式异常都会让 wordcloud2.js 卡死 */
+function wcSanitizeList(list) {
+  const out = [];
+  (Array.isArray(list) ? list : []).forEach(item => {
+    if (!Array.isArray(item) || item.length < 2) return;
+    const word = typeof item[0] === 'string' ? item[0].trim() : '';
+    const count = Number(item[1]);
+    if (!word) return;
+    if (!Number.isFinite(count) || count <= 0) return;
+    out.push([word, count]);
+  });
+  out.sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);
+  return out.slice(0, 60);
 }
 
 /* 词云页：返回键 + 标题 + 双筛选标签 + canvas 容器 */
@@ -8707,6 +8743,7 @@ function renderWordCloudPage() {
 function drawWordCloud() {
   const canvas = $('#wordcloud-canvas');
   if (!canvas) return;
+  const seq = ++wcRenderSeq;   /* 每次调用递增，100ms 延迟任务据此判断是否已过期 */
   const emptyEl = $('#wcEmpty');
   const dn = taName(wcRoleId || state.activeRoleId);
   const rankEl = $('#wcRank');
@@ -8728,9 +8765,9 @@ function drawWordCloud() {
     return;
   }
 
-  /* ② 取数 + 词频统计（数组格式 [['词语', 频次], ...]） */
+  /* ② 取数 + 词频统计 → 严格清洗成 [['词语', 频次], ...] 数组，最多 60 个词 */
   const texts = wcCollectTexts(wcRoleId || state.activeRoleId, wcTimeTab, wcWhoTab);
-  const list = wcBuildList(texts);
+  const list = wcSanitizeList(wcBuildList(texts));
   if (!list.length) {
     showEmpty(texts.length
       ? '这段时间的文字内容太少，暂时提取不出关键词，再多聊几句试试'
@@ -8740,6 +8777,11 @@ function drawWordCloud() {
 
   /* ③ 渲染前保证 canvas 可见且有实际尺寸（之前隐藏过会导致宽高为 0，画出来是空白） */
   showCanvas();
+  /* 尺寸校验：容器未布局 / 被隐藏时宽高为 0，词云库会在内部无限计算，直接中止渲染 */
+  if (!canvas.offsetWidth || !canvas.offsetHeight) {
+    showEmpty('页面布局还没有准备好，请稍后再进入词云看看');
+    return;
+  }
   let cssW = canvas.clientWidth;
   if (!cssW) {
     const stage = canvas.parentElement;
@@ -8763,32 +8805,37 @@ function drawWordCloud() {
     rankEl.classList.remove('hidden');
   }
 
-  /* ④ try-catch 包裹渲染，库内部异常时只提示、不白屏 */
-  try {
-    WordCloud(canvas, {
-      list,
-      gridSize: Math.max(4, Math.round(8 * dpr)),
-      weightFactor: function (count) {
-        /* 按词频放大字号，最小 14px、最大不超过 50px（CSS 像素），再乘 dpr */
-        return Math.min(50, Math.max(14, count * 4)) * dpr;
-      },
-      fontFamily: 'sans-serif',
-      fontWeight: 600,
-      color: function () {
-        /* 主题蓝 + 低饱和糖果色随机 */
-        const colors = ['#007AFF', '#FF6B81', '#A29BFE', '#55E6C1', '#FDCB6E'];
-        return colors[Math.floor(Math.random() * colors.length)];
-      },
-      backgroundColor: 'transparent',
-      rotateRatio: 0.3,       /* 少量词允许旋转，排版更活泼 */
-      shuffle: false,         /* 高频词优先落在中心 */
-      drawOutOfBound: false,
-      shrinkToFit: true
-    });
-  } catch (err) {
-    console.error('[互动词云] 渲染失败：', err);
-    showEmpty('词云渲染出错了，换个筛选条件再试试');
-  }
+  /* ④ 延迟 100ms 再画：先让页面与筛选按钮正常显示，避免一进词云页就白屏卡死 */
+  setTimeout(() => {
+    /* 过期任务直接作废；canvas 不在文档中（已返回/切页）也放弃本次渲染 */
+    if (seq !== wcRenderSeq || !canvas.isConnected) return;
+    try {
+      WordCloud(canvas, {
+        list,
+        gridSize: Math.max(4, Math.round(8 * dpr)),
+        weightFactor: function (count) {
+          /* 按词频放大字号，最小 14px、最大不超过 50px（CSS 像素），再乘 dpr */
+          return Math.min(50, Math.max(14, count * 4)) * dpr;
+        },
+        fontFamily: 'sans-serif',
+        fontWeight: 600,
+        color: function () {
+          /* 主题蓝 + 低饱和糖果色随机 */
+          const colors = ['#007AFF', '#FF6B81', '#A29BFE', '#55E6C1', '#FDCB6E'];
+          return colors[Math.floor(Math.random() * colors.length)];
+        },
+        backgroundColor: 'transparent',
+        rotateRatio: 0.3,       /* 少量词允许旋转，排版更活泼 */
+        shuffle: false,         /* 高频词优先落在中心 */
+        drawOutOfBound: false,
+        shrinkToFit: true
+      });
+    } catch (err) {
+      /* 库内部异常只打印并提示，绝不向上抛，避免整页卡死 */
+      console.error('[互动词云] 渲染失败：', err);
+      showEmpty('词云渲染出错了，换个筛选条件再试试');
+    }
+  }, 100);
 }
 
 /* =========================================================
