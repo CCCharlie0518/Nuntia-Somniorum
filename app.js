@@ -8499,7 +8499,7 @@ function renderSub(name) {
  * ③ 只按显式停用词表过滤；统计后把「好好 / 好好好」这类叠词按完整词合并频次
  * ④ 频次降序排序，仅在最终渲染阶段取前 10 名交给 wordcloud2.js 与排行榜
  * ========================================================= */
-let wcTimeTab = 'week';   /* today 今日 / week 本周 / month 本月，默认本周 */
+let wcTimeTab = 'week';   /* today 今日 / week 本周 / all 全部，默认本周 */
 let wcWhoTab = 'ta';      /* ta TA说的 / me 我说的，默认 TA 说的 */
 let wcRoleId = null;      /* 进入词云页时锁定的梦角 id，切换筛选时保持不变 */
 let wcRenderSeq = 0;      /* 渲染序号：快速切换筛选时，旧的延迟渲染任务自动作废，避免重复叠画卡死 */
@@ -8592,6 +8592,8 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
   const list = state.chats[roleId] || [];
   const nowDate = new Date();
   const now = nowDate.getTime();
+  /* 全部：不做任何时间戳比对，所有历史聊天都纳入统计 */
+  const isAll = timeTab === 'all';
   let start = 0;
   if (timeTab === 'today') {
     /* 今日：今天 00:00:00 起 */
@@ -8601,9 +8603,6 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
     const day = nowDate.getDay();
     const back = day === 0 ? 6 : day - 1;
     start = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - back, 0, 0, 0, 0).getTime();
-  } else if (timeTab === 'month') {
-    /* 本月：用当前年月，固定从 1 号 00:00:00 开始（绝不用「当前时间减 30 天」） */
-    start = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0).getTime();
   }
   const wantSender = whoTab === 'ta' ? 'ta' : 'user';
   const texts = list.filter(m => {
@@ -8613,6 +8612,7 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
     if (type !== 'text') return false;
     if (wcMsgSender(m) !== wantSender) return false;
     if (!wcMsgText(m)) return false;
+    if (isAll) return true;   /* 全部：跳过时间戳比对，缺失 ts 的旧记录也能统计 */
     const ts = wcMsgTs(m);
     return ts > 0 && ts >= start && ts <= now + 60 * 1000;   /* 允许 1 分钟时钟误差 */
   }).map(m => wcMsgText(m));
@@ -8734,7 +8734,7 @@ function renderWordCloudPage() {
     <div class="wc-tabs">
       <button class="wc-tab ${wcTimeTab === 'today' ? 'active' : ''}" data-wctime="today">今日</button>
       <button class="wc-tab ${wcTimeTab === 'week' ? 'active' : ''}" data-wctime="week">本周</button>
-      <button class="wc-tab ${wcTimeTab === 'month' ? 'active' : ''}" data-wctime="month">本月</button>
+      <button class="wc-tab ${wcTimeTab === 'all' ? 'active' : ''}" data-wctime="all">全部</button>
     </div>
     <div class="wc-tabs">
       <button class="wc-tab ${wcWhoTab === 'ta' ? 'active' : ''}" data-wcwho="ta">${esc(dn)}说的</button>
@@ -8797,9 +8797,10 @@ function drawWordCloud() {
   const texts = wcCollectTexts(wcRoleId || state.activeRoleId, wcTimeTab, wcWhoTab);
   const fullList = wcSanitizeList(wcBuildList(texts));
   if (!fullList.length) {
+    const scope = wcTimeTab === 'all' ? '全部聊天记录' : '这段时间';
     showEmpty(texts.length
-      ? '这段时间的文字内容太少，暂时提取不出关键词，再多聊几句试试'
-      : '这段时间还没有可统计的聊天文字，先去和 ' + dn + ' 说说话吧');
+      ? scope + '的文字内容太少，暂时提取不出关键词，再多聊几句试试'
+      : scope + '还没有可统计的聊天文字，先去和 ' + dn + ' 说说话吧');
     return;
   }
 
