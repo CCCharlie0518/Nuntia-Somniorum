@@ -8501,19 +8501,29 @@ const WC_STOP_WORDS = new Set([
   '已', '为', '且', '即', '却', '若', '虽', '及', '并', '所', '如', '同', '比',
   '等', '每', '各', '别', '另', '您', '咱', '啥'
 ]);
-/* 只由这些单字组成的词（如「我你」）同样无意义，整段丢弃 */
-const WC_STOP_CHARS = new Set(Array.from(WC_STOP_WORDS));
+/* 停用词表补充：常见无实义的双字组合，避免「我们、那个、就是」这类词占榜；
+ * 其余 2~6 字纯汉字片段一律参与统计，不再做「整词由虚词组成」的过度过滤 */
+['我们', '你们', '他们', '这个', '那个', '什么', '怎么', '就是', '还有', '可以',
+ '因为', '所以', '但是', '如果', '时候', '现在', '一下', '这样', '那样', '不要']
+  .forEach(w => WC_STOP_WORDS.add(w));
 
 /* 显示上限：统计阶段一律全量累加，只有传给 WordCloud 与排行榜时才截取前 10 名；
- * 单条消息 5000 字、全部文本 20000 字，超长一律截断（这是文本量预算，不限制词数） */
+ * 单条消息最多统计 5000 字（防单条超长文本）；总字符预算放大到 100 万字，
+ * 正常聊天记录（哪怕几万条）都不会被截断，彻底解决「频次偏低」问题 */
 const WC_TOP_N = 10;
 const WC_MAX_TEXT_LEN = 5000;
-const WC_MAX_TOTAL_CHARS = 20000;
+const WC_MAX_TOTAL_CHARS = 1000000;
 
-/* 停用词判断：显式命中停用词，或整词全部由虚词 / 代词组成 */
+/* 停用词判断：只按专门的停用词表过滤 */
 function wcIsStopWord(w) {
-  if (WC_STOP_WORDS.has(w)) return true;
-  return Array.from(w).every(ch => WC_STOP_CHARS.has(ch));
+  return WC_STOP_WORDS.has(w);
+}
+
+/* 单字重复归一化：「好好好」→「好好」、「哈哈哈」→「哈哈」，
+ * 避免同一个语气词因重复次数不同被拆成多个不同的词分别计数 */
+function wcNormalizeWord(w) {
+  if (w.length >= 2 && /^(.)\1+$/.test(w)) return w.slice(0, 2);
+  return w;
 }
 
 /* 片段清洗：只保留汉字（纯数字、纯字母、emoji、符号会被清成空串，后续自然丢弃） */
@@ -8560,23 +8570,33 @@ function wcMsgText(m) {
   return '';
 }
 
-/* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容 */
+/* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容（全量遍历，不做条数限制） */
 function wcCollectTexts(roleId, timeTab, whoTab) {
   const list = state.chats[roleId] || [];
-  const DAY = 24 * 60 * 60 * 1000;
   const now = Date.now();
   let start = 0;
   if (timeTab === 'today') {
+    /* 今日：今天 00:00:00 起 */
     const d = new Date(); d.setHours(0, 0, 0, 0); start = d.getTime();
   } else if (timeTab === 'week') {
-    start = now - 7 * DAY;
+    /* 本周：本周一 00:00:00 起（getDay() 周日是 0，要回退 6 天而不是 1 天） */
+    const d = new Date();
+    const day = d.getDay();
+    const back = day === 0 ? 6 : day - 1;
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - back);
+    start = d.getTime();
   } else if (timeTab === 'month') {
-    start = now - 30 * DAY;
+    /* 本月：本月 1 号 00:00:00 起（不再用「最近 30 天」，避免月初数据被漏掉） */
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(1);
+    start = d.getTime();
   }
   const wantSender = whoTab === 'ta' ? 'ta' : 'user';
   return list.filter(m => {
     if (!m || m.recalled) return false;
-    /* 只统计纯文字消息：图片 / 表情包 / 转账 / 礼物 / 通话 / 问卷一律跳过 */
+    /* 只统计纯文字消息：图片 / 表情包 / 转账 / 礼物 / 通话 / 卡片一律跳过 */
     const type = m.type || 'text';
     if (type !== 'text') return false;
     if (wcMsgSender(m) !== wantSender) return false;
@@ -8586,13 +8606,45 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
   }).map(m => wcMsgText(m));
 }
 
+/* 找出 word 在词库里已存在的最短真子串（长度 2 起）；长度最多 6，枚举量极小，全程 for 循环无 while */
+function wcShortestSubWord(word, freq) {
+  for (let len = 2; len < word.length; len++) {
+    for (let i = 0; i + len <= word.length; i++) {
+      const sub = word.slice(i, i + len);
+      if (freq[sub] !== undefined) return sub;
+    }
+  }
+  return '';
+}
+
+/* 同义 / 重叠词归并：把「好好好、想你了」这类长词并入词库里已存在的最短子串（「好好、想你」），
+ * 消除同一语义因切分长度不同导致频次被拆散；先算好合并目标，再统一应用，避免边遍历边改表 */
+function wcMergeSubWords(freq) {
+  const words = Object.keys(freq);
+  const targets = Object.create(null);
+  words.forEach(w => {
+    let cur = w;
+    /* 最多上溯 5 层（词长上限 6，子串必定更短，不会成环） */
+    for (let step = 0; step < 5; step++) {
+      const next = wcShortestSubWord(cur, freq);
+      if (!next || next === cur) break;
+      cur = next;
+    }
+    if (cur !== w) targets[w] = cur;
+  });
+  Object.keys(targets).forEach(w => {
+    freq[targets[w]] = (freq[targets[w]] || 0) + freq[w];
+    delete freq[w];
+  });
+}
+
 /* 最简词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15], ...] 格式
  * 全程只有 split + forEach，没有任何 while 循环，结构上不可能死循环
  * 规则：超级正则切分 → 只保留汉字 → 2~6 字且非停用词的片段全部计数（不截断）
- * 注意：这里只做全量统计 + 降序排序，截取前 10 名留给渲染阶段（drawWordCloud） */
+ * 统计后先做「重复字归一化 + 子串归并」，再做降序排序；截取前 10 名留给渲染阶段 */
 function wcBuildList(texts) {
   const freq = Object.create(null);
-  let budget = WC_MAX_TOTAL_CHARS;   /* 总字符预算：超长文本叠加也不会拖死主线程 */
+  let budget = WC_MAX_TOTAL_CHARS;   /* 100 万字预算，仅作极端保护，正常聊天不会被截断 */
 
   texts.forEach(t => {
     if (budget <= 0) return;
@@ -8602,12 +8654,15 @@ function wcBuildList(texts) {
     budget -= raw.length;
     /* 空格、换行、制表符、全部中英文标点与特殊符号一律作为分割线 */
     raw.split(WC_SPLIT_RE).forEach(piece => {
-      const clean = wcCleanFragment(piece);              /* 纯数字/字母/emoji/符号 → 空串 */
-      if (clean.length < 2 || clean.length > 6) return;  /* 只保留 2~6 字自然短语 */
-      if (wcIsStopWord(clean)) return;                   /* 过滤停用词 */
-      freq[clean] = (freq[clean] || 0) + 1;              /* 所有合格词全量累加，不设词数上限 */
+      const clean = wcNormalizeWord(wcCleanFragment(piece));   /* 纯数字/字母/emoji/符号 → 空串 */
+      if (clean.length < 2 || clean.length > 6) return;        /* 只保留 2~6 字自然短语 */
+      if (wcIsStopWord(clean)) return;                         /* 只按停用词表过滤 */
+      freq[clean] = (freq[clean] || 0) + 1;                    /* 所有合格词全量累加，不设词数上限 */
     });
   });
+
+  /* 归并「好好 / 好好好」「想你 / 想你了」这类同义拆分，让频次集中 */
+  wcMergeSubWords(freq);
 
   /* 转为数组后按频次降序排序（同频时长词优先），此处不截断 */
   return Object.keys(freq)
@@ -8733,26 +8788,15 @@ function drawWordCloud() {
   /* ③ 只有最终渲染才截取前 10 名：词云与排行榜共用同一份 Top 10，统计结果本身是完整的 */
   const list = fullList.slice(0, WC_TOP_N);
 
-  /* ④ 渲染前保证 canvas 可见且有实际尺寸（之前隐藏过会导致宽高为 0，画出来是空白） */
+  /* ④ 渲染前保证 canvas 可见（隐藏时宽高为 0，画出来会是空白） */
   showCanvas();
-  /* 尺寸校验：容器未布局 / 被隐藏时宽高为 0，词云库会在内部无限计算，直接中止渲染 */
+  /* 布局尚未完成（宽高为 0）时直接中止，避免词云库在内部空转 */
   if (!canvas.offsetWidth || !canvas.offsetHeight) {
     showEmpty('页面布局还没有准备好，请稍后再进入词云看看');
     return;
   }
-  let cssW = canvas.clientWidth;
-  if (!cssW) {
-    const stage = canvas.parentElement;
-    cssW = (stage && stage.clientWidth ? stage.clientWidth - 16 : 0) || 300;
-  }
-  const cssH = Math.max(200, canvas.clientHeight || 400);
-  /* 画布 1:1 像素（不再乘 dpr），高度由 style.css 固定，保证排版有足够空间 */
-  canvas.width = Math.max(1, Math.round(cssW));
-  canvas.height = Math.max(1, Math.round(cssH));
-  /* 重设 width/height 已会清空画布，这里再显式清一次，确保上一次的绘制不会残留叠加 */
-  try { canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height); } catch (err) { /* 忽略 */ }
 
-  /* ④ 动态字号区间：取 Top 10 里的最大 / 最小频次，把频次线性映射到 16px ~ 55px，
+  /* ⑤ 动态字号区间：取 Top 10 里的最大 / 最小频次，把频次线性映射到 16px ~ 55px，
    * 让最高频的词尽量撑满画布，最低频的词也保持可读（数据已按频次降序，首位即最大值） */
   const maxCount = list[0][1];
   const minCount = list[list.length - 1][1];
@@ -8769,11 +8813,19 @@ function drawWordCloud() {
     rankEl.classList.remove('hidden');
   }
 
-  /* ⑤ 延迟 100ms 再画：先让页面与筛选按钮正常显示，避免一进词云页就白屏卡死 */
+  /* ⑥ 延迟 200ms 再画：等 DOM 完全渲染、父容器尺寸稳定后，再强制写入真实像素尺寸 */
   setTimeout(() => {
     /* 过期任务直接作废；canvas 不在文档中（已返回/切页）也放弃本次渲染 */
     if (seq !== wcRenderSeq || !canvas.isConnected) return;
     try {
+      /* 强制绝对像素：直接量父容器真实宽度（兜底 300），高度固定 350，
+       * 避免移动端按 CSS 百分比自动缩放，把整块词云压成一团 */
+      const parentWidth = Math.round(canvas.parentElement.getBoundingClientRect().width) || 300;
+      canvas.width = Math.max(200, parentWidth);
+      canvas.height = 350;
+      /* 重设 width/height 会清空画布，这里再显式清一次，确保上一次绘制不残留叠加 */
+      try { canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height); } catch (clearErr) { /* 忽略 */ }
+
       WordCloud(canvas, {
         list,
         gridSize: 10,        /* 网格从 16 缩小到 10：排布更紧凑，更容易填满画布空隙 */
@@ -8802,7 +8854,7 @@ function drawWordCloud() {
       console.error('[互动词云] 渲染失败：', err);
       showEmpty('词云渲染出错了，换个筛选条件再试试');
     }
-  }, 100);
+  }, 200);   /* 至少 200ms，确保移动端 DOM 与容器尺寸都已稳定 */
 }
 
 /* =========================================================
