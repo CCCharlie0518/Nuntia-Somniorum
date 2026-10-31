@@ -2,7 +2,7 @@
 'use strict';
 
 /* 全局版本号：显示在设置页最底部；日后发版只需改这一处 */
-const APP_VERSION = 'v7.5.0';
+const APP_VERSION = 'v7.5.1';
 
 /* =========================================================
  * 一、基础工具函数
@@ -2297,6 +2297,7 @@ function renderChatPage(roleId) {
       <button data-kebab="pat">${APP_ICONS.pat}<span>拍一拍设置</span></button>
       <button data-kebab="probability">${APP_ICONS.probability}<span>概率与行为</span></button>
       <button data-kebab="stickers">${APP_ICONS.stickers}<span>表情包管理</span></button>
+      <button data-kebab="wordcloud">${APP_ICONS.wordcloud}<span>互动词云</span></button>
     </div>
     <div class="chat-scroll" id="chatScroll"><div class="chat-list" id="chatList"></div></div>
     <div class="img-draft-bar" id="imgDraftBar"><div class="img-draft-list" id="imgDraftList"></div></div>
@@ -4257,6 +4258,8 @@ const APP_ICONS = {
   location: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="m15.4 8.6-2 5-4.8 1.8 2-5Z"/></svg>',
   storage: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="6.4" rx="7.4" ry="2.8"/><path d="M4.6 6.4v11.2c0 1.6 3.3 2.8 7.4 2.8s7.4-1.2 7.4-2.8V6.4"/><path d="M4.6 12c0 1.6 3.3 2.8 7.4 2.8s7.4-1.2 7.4-2.8"/></svg>',
   probability: '<svg viewBox="0 0 24 24"><path d="M4.5 7h9M17.5 7h2M4.5 12h3M11.5 12h8M4.5 17h9M17.5 17h2"/><circle cx="15.5" cy="7" r="1.8"/><circle cx="9.5" cy="12" r="1.8"/><circle cx="15.5" cy="17" r="1.8"/></svg>',
+  /* 互动词云：线条风柱状统计图（尺寸、描边色、线宽统一由 .chat-kebab button svg 控制） */
+  wordcloud: '<svg viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>',
   redpackets: '<svg viewBox="0 0 24 24"><path d="M4.5 8.6h12.6l-3.1-3.1M19.5 15.4H6.9l3.1 3.1"/></svg>',
   wallet: '<svg viewBox="0 0 24 24"><path d="M3.6 7.6A2.4 2.4 0 0 1 6 5.2h10.4a2.4 2.4 0 0 1 2.4 2.4v.8"/><rect x="3.6" y="7.6" width="16.8" height="11.2" rx="2.4"/><circle cx="16.4" cy="13.2" r="1.2"/></svg>',
   ledger: '<svg viewBox="0 0 24 24"><path d="M5 4.6h11.4A2.6 2.6 0 0 1 19 7.2v12.2H7.6A2.6 2.6 0 0 1 5 16.8Z"/><path d="M5 16.8h14M9 8.4h6"/></svg>',
@@ -8457,6 +8460,7 @@ function renderSub(name) {
     case 'gifts': return renderGiftPage();
     case 'pat': return renderPatPage();
     case 'pet': return renderPetPage();
+    case 'wordcloud': return renderWordCloudPage();  /* 互动词云：聊天页快捷菜单进入 */
     case 'play': return renderPlayPage();            /* 一起玩：一起做 → 一起玩 → 五子棋 的二级页 */
     case 'games': return renderPlayPage();           /* 旧路由兜底：桌面小游戏已并入【一起玩】 */
     case 'readtogether': return renderReadTogetherPage();
@@ -8467,6 +8471,179 @@ function renderSub(name) {
     case 'reminder': return renderReminderPage();
     default: return renderSettingsPage();
   }
+}
+
+/* =========================================================
+ * 十三·三、互动词云（聊天页右上角快捷菜单进入）
+ * 纯前端轻量词频统计，无后端分词：
+ * ① 只保留连续中文片段（标点/表情/字母/数字一律当分隔）
+ * ② 滑动窗口提取 2~4 字词组
+ * ③ 剔除「的、了、是、在、我、你、他、这、那、就」等停用单字组成的词与显式停用词
+ * ④ 频次排序 + 子串去重，取前 60 个交给 wordcloud2.js 渲染
+ * ========================================================= */
+let wcTimeTab = 'week';   /* today 今日 / week 本周 / month 本月，默认本周 */
+let wcWhoTab = 'ta';      /* ta TA说的 / me 我说的，默认 TA 说的 */
+
+/* 硬停用单字（的、了、是、在、这、那、就等虚词/语气词）：直接作为切分点，绝不出现在词内 */
+const WC_HARD_CHARS = '的了是在这那就也都还和跟与或但而啊呀吧呢嘛么哦嗯不没很太最更之着过们个于把被让给对向从又再先只已为且即却若虽及并所如同比等每各别另';
+const WC_HARD_RE = new RegExp('[' + WC_HARD_CHARS + ']+');
+/* 软停用单字（人称代词）：可以成词（想你/陪我），但全由代词组成的词（如"我你"）无意义 */
+const WC_STOP_SOFT = new Set('我你他她它'.split(''));
+/* 高频无意义双字/多字词，直接整体过滤 */
+const WC_STOP_PHRASES = new Set([
+  '什么', '怎么', '怎样', '为什么', '这个', '那个', '就是', '不是', '没有', '没什么',
+  '还是', '还有', '一个', '一些', '可以', '可能', '应该', '因为', '所以', '但是',
+  '然后', '现在', '知道', '觉得', '这样', '那样', '真的', '时候', '东西', '事情',
+  '一下', '一点', '有点', '不会', '不能', '不要', '不用', '没事', '这么', '那么', '已经'
+]);
+
+/* 判断候选词是否为停用词（显式命中，或全部由人称代词组成） */
+function wcIsStopWord(w) {
+  if (WC_STOP_PHRASES.has(w)) return true;
+  for (const ch of w) if (!WC_STOP_SOFT.has(ch)) return false;
+  return true;
+}
+
+/* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容 */
+function wcCollectTexts(roleId, timeTab, whoTab) {
+  const list = state.chats[roleId] || [];
+  const DAY = 24 * 60 * 60 * 1000;
+  let start = 0;
+  if (timeTab === 'today') {
+    const d = new Date(); d.setHours(0, 0, 0, 0); start = d.getTime();
+  } else if (timeTab === 'week') {
+    start = Date.now() - 7 * DAY;
+  } else if (timeTab === 'month') {
+    start = Date.now() - 30 * DAY;
+  }
+  const wantSender = whoTab === 'ta' ? 'ta' : 'user';
+  return list.filter(m => {
+    if (!m || m.recalled) return false;
+    /* 只统计普通文字气泡：转账/礼物/表情/通话/问卷等带 type 的消息不参与 */
+    if (m.type && m.type !== 'text') return false;
+    if (m.sender !== wantSender) return false;
+    if (!m.content || !String(m.content).trim()) return false;
+    return (m.ts || 0) >= start;
+  }).map(m => String(m.content));
+}
+
+/* 轻量中文词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15]] 格式 */
+function wcBuildList(texts) {
+  const freq = Object.create(null);
+  const add = w => { freq[w] = (freq[w] || 0) + 1; };
+  texts.forEach(t => {
+    /* 非中文字符（标点、空白、emoji、字母、数字）一律视为分隔 */
+    String(t || '').split(/[^一-龥]+/).forEach(seg => {
+      /* 再按硬停用字二次切分：虚词成为天然词边界，从源头消除"刚还""的消"这类跨界噪声 */
+      seg.split(WC_HARD_RE).forEach(frag => {
+        const n = frag.length;
+        if (n < 2) return;
+        if (n <= 4) { add(frag); return; }         /* 短片段整体成词，不产生滑窗噪声 */
+        for (let size = 2; size <= 4; size++)      /* 长片段才用滑窗提取 2~4 字词组 */
+          for (let i = 0; i + size <= n; i++) add(frag.slice(i, i + size));
+      });
+    });
+  });
+  let arr = Object.keys(freq).map(w => [w, freq[w]]).filter(([w]) => !wcIsStopWord(w));
+  arr.sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);  /* 频次降序，同频长词优先 */
+  /* 候选足够多时丢弃只出现 1 次的长尾噪声 */
+  if (arr.length > 40) arr = arr.filter(([, c]) => c >= 2);
+  /* 子串去重：已入选的词若包含当前词且频次不输，则跳过当前词 */
+  const picked = [];
+  for (const item of arr) {
+    if (picked.some(([pw, pc]) => pw !== item[0] && pw.includes(item[0]) && pc >= item[1])) continue;
+    picked.push(item);
+    if (picked.length >= 60) break;
+  }
+  return picked;
+}
+
+/* 词云页：返回键 + 标题 + 双筛选标签 + canvas 容器 */
+function renderWordCloudPage() {
+  /* 每次从快捷菜单进入都恢复默认筛选：本周 + TA说的 */
+  wcTimeTab = 'week';
+  wcWhoTab = 'ta';
+  const roleId = state.activeRoleId;
+  const dn = taName(roleId);
+  const body = subShell('互动词云', `
+    <div class="wc-tabs">
+      <button class="wc-tab ${wcTimeTab === 'today' ? 'active' : ''}" data-wctime="today">今日</button>
+      <button class="wc-tab ${wcTimeTab === 'week' ? 'active' : ''}" data-wctime="week">本周</button>
+      <button class="wc-tab ${wcTimeTab === 'month' ? 'active' : ''}" data-wctime="month">本月</button>
+    </div>
+    <div class="wc-tabs">
+      <button class="wc-tab ${wcWhoTab === 'ta' ? 'active' : ''}" data-wcwho="ta">${esc(dn)}说的</button>
+      <button class="wc-tab ${wcWhoTab === 'me' ? 'active' : ''}" data-wcwho="me">我说的</button>
+    </div>
+    <div class="wc-stage">
+      <canvas id="wordcloud-canvas" style="width: 100%; height: 400px;"></canvas>
+      <div class="wc-empty hidden" id="wcEmpty"></div>
+    </div>
+    <div class="wc-tip muted">统计与 ${esc(dn)} 的聊天文字内容，已自动过滤标点与常用虚词</div>
+  `);
+  $$('[data-wctime]', body).forEach(btn => btn.addEventListener('click', () => {
+    if (wcTimeTab === btn.dataset.wctime) return;
+    wcTimeTab = btn.dataset.wctime;
+    $$('[data-wctime]', body).forEach(b => b.classList.toggle('active', b === btn));
+    drawWordCloud();
+  }));
+  $$('[data-wcwho]', body).forEach(btn => btn.addEventListener('click', () => {
+    if (wcWhoTab === btn.dataset.wcwho) return;
+    wcWhoTab = btn.dataset.wcwho;
+    $$('[data-wcwho]', body).forEach(b => b.classList.toggle('active', b === btn));
+    drawWordCloud();
+  }));
+  /* 等布局稳定后再量 canvas 实际宽度，避免 backing store 拉伸模糊 */
+  requestAnimationFrame(() => drawWordCloud());
+}
+
+/* 取数 → 统计 → 调用 wordcloud2.js 绘制 */
+function drawWordCloud() {
+  const canvas = $('#wordcloud-canvas');
+  if (!canvas) return;
+  const emptyEl = $('#wcEmpty');
+  const dn = taName(state.activeRoleId);
+  const showEmpty = msg => {
+    canvas.style.display = 'none';
+    if (emptyEl) { emptyEl.textContent = msg; emptyEl.classList.remove('hidden'); }
+  };
+  if (typeof WordCloud !== 'function') {
+    showEmpty('词云组件加载失败，请检查网络后重新进入');
+    return;
+  }
+  const list = wcBuildList(wcCollectTexts(state.activeRoleId, wcTimeTab, wcWhoTab));
+  if (!list.length) {
+    showEmpty('这段时间还没有可统计的聊天文字，先去和 ' + dn + ' 说说话吧');
+    return;
+  }
+  canvas.style.display = '';
+  if (emptyEl) emptyEl.classList.add('hidden');
+  /* backing store 按元素实际尺寸 × 设备像素比设置，高分屏下文字才不糊 */
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 300;
+  const cssH = 400;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  WordCloud(canvas, {
+    list,
+    gridSize: Math.max(4, Math.round(8 * dpr)),
+    weightFactor: function (count) {
+      /* 按词频放大字号，最小 14px、最大不超过 50px（CSS 像素），再乘 dpr */
+      return Math.min(50, Math.max(14, count * 4)) * dpr;
+    },
+    fontFamily: 'sans-serif',
+    fontWeight: 600,
+    color: function () {
+      /* 主题蓝 + 低饱和糖果色随机 */
+      const colors = ['#007AFF', '#FF6B81', '#A29BFE', '#55E6C1', '#FDCB6E'];
+      return colors[Math.floor(Math.random() * colors.length)];
+    },
+    backgroundColor: 'transparent',
+    rotateRatio: 0.3,       /* 少量词允许旋转，排版更活泼 */
+    shuffle: false,         /* 高频词优先落在中心 */
+    drawOutOfBound: false,
+    shrinkToFit: true
+  });
 }
 
 /* =========================================================

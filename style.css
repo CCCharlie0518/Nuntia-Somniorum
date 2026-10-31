@@ -1219,6 +1219,15 @@ body{
 .switch input:checked + .slider{background:#34C759;}
 .tip-box{background:rgba(var(--primary-rgb),.07);color:#5A6B85;border-radius:12px;}
 .muted{color:#8E8E93;}
+/* 设置页底部版本号：居中浅灰小字，padding-bottom 叠加安全区，避开苹果底部小黑条 */
+.app-version-text{
+  text-align:center;
+  color:#b0b0b0;
+  font-size:12px;
+  padding:20px 0;
+  padding-bottom:calc(20px + env(safe-area-inset-bottom));
+  letter-spacing:0.5px;
+}
 .stat-cell{background:#F2F2F7;border-radius:12px;}
 .stat-cell .num{color:var(--primary);}
 .bubble-input{background:#F2F2F7;border-radius:14px;}
@@ -2734,6 +2743,28 @@ canvas.gmk{display:block;width:100%;aspect-ratio:1/1;touch-action:manipulation;c
 .mw-btn svg{width:20px;height:20px;}
 .mw-btn.play{background:rgba(var(--primary-rgb),.10);}
 .mw-btn:active{opacity:.6;}
+
+/* ===================== 互动词云页（聊天页快捷菜单进入） ===================== */
+/* 双筛选标签：今日/本周/本月 + TA说的/我说的，复用拍一拍标签的视觉语言 */
+.wc-tabs{display:flex;gap:8px;margin-bottom:10px;}
+.wc-tab{
+  flex:1;padding:9px 0;border-radius:11px;background:#fff;
+  font-size:13.5px;color:#5f6672;box-shadow:var(--shadow);
+  transition:background .15s,color .15s;touch-action:manipulation;
+}
+.wc-tab.active{background:var(--primary);color:#fff;font-weight:600;}
+/* 词云画布卡片容器：白底圆角衬托透明背景的 canvas */
+.wc-stage{
+  position:relative;background:#fff;border-radius:16px;
+  box-shadow:var(--shadow);padding:8px;margin-bottom:10px;
+}
+.wc-stage canvas{display:block;}
+/* 无数据/加载失败时的占位提示，绝对定位覆盖在画布区域上 */
+.wc-empty{
+  position:absolute;inset:8px;display:flex;align-items:center;justify-content:center;
+  text-align:center;color:#9aa0a8;font-size:13.5px;line-height:1.8;padding:0 24px;
+}
+.wc-tip{font-size:12px;text-align:center;line-height:1.6;}
 
 /* 1×2 照片墙：单图铺满整个组件（不再 2×2 网格） */
 .photo-wall-widget{
