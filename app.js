@@ -8504,8 +8504,9 @@ const WC_STOP_WORDS = new Set([
 /* 只由这些单字组成的词（如「我你」）同样无意义，整段丢弃 */
 const WC_STOP_CHARS = new Set(Array.from(WC_STOP_WORDS));
 
-/* 词数上限 40（绝不能多传）；单条消息 5000 字、全部文本 20000 字，超长一律截断 */
-const WC_MAX_WORDS = 40;
+/* 词数硬上限 10（词云与排行榜都只用 Top 10，数据量越小渲染越稳）；
+ * 单条消息 5000 字、全部文本 20000 字，超长一律截断 */
+const WC_MAX_WORDS = 10;
 const WC_MAX_TEXT_LEN = 5000;
 const WC_MAX_TOTAL_CHARS = 20000;
 
@@ -8587,7 +8588,7 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
 
 /* 最简词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15]] 格式
  * 全程只有 split + forEach，没有任何 while 循环，结构上不可能死循环
- * 规则：超级正则切分 → 只保留汉字 → 2~6 字且非停用词的片段计数 → 降序取前 40 */
+ * 规则：超级正则切分 → 只保留汉字 → 2~6 字且非停用词的片段计数 → 降序取前 10 */
 function wcBuildList(texts) {
   const freq = Object.create(null);
   let budget = WC_MAX_TOTAL_CHARS;   /* 总字符预算：超长文本叠加也不会拖死主线程 */
@@ -8610,12 +8611,12 @@ function wcBuildList(texts) {
   return Object.keys(freq)
     .map(w => [w, freq[w]])
     .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)  /* 频次降序，同频长词优先 */
-    .slice(0, WC_MAX_WORDS);                                   /* 最多 40 个，绝不多传 */
+    .slice(0, WC_MAX_WORDS);                                   /* 只留 Top 10，绝不多传 */
 }
 
 /* 渲染前数据清洗（词云库与排行榜共用）：
  * 只接受 [['词语', 正数频次], ...] 的数组格式，剔除空词、NaN / undefined / null / 非正数频次，
- * 按频次降序后最多取 40 个 —— 词数过多或格式异常都会让 wordcloud2.js 卡死 */
+ * 按频次降序后只取前 10 个 —— 词数过多或格式异常都会让 wordcloud2.js 卡死 */
 function wcSanitizeList(list) {
   const out = [];
   (Array.isArray(list) ? list : []).forEach(item => {
@@ -8628,6 +8629,20 @@ function wcSanitizeList(list) {
   });
   out.sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);
   return out.slice(0, WC_MAX_WORDS);
+}
+
+/* 切换筛选时的过渡态：立刻清空旧画布并显示「正在统计…」，
+ * 让点击反馈瞬间可见，真正的计算与重绘放到下一个任务里执行 */
+function wcShowLoading() {
+  const canvas = $('#wordcloud-canvas');
+  if (canvas) {
+    canvas.style.display = 'block';
+    try { canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height); } catch (err) { /* 忽略 */ }
+  }
+  const emptyEl = $('#wcEmpty');
+  if (emptyEl) { emptyEl.textContent = '正在统计…'; emptyEl.classList.remove('hidden'); }
+  const rankEl = $('#wcRank');
+  if (rankEl) { rankEl.classList.add('hidden'); rankEl.innerHTML = ''; }
 }
 
 /* 词云页：返回键 + 标题 + 双筛选标签 + canvas 容器 */
@@ -8661,14 +8676,18 @@ function renderWordCloudPage() {
   $$('[data-wctime]', body).forEach(btn => btn.addEventListener('click', () => {
     if (wcTimeTab === btn.dataset.wctime) return;
     wcTimeTab = btn.dataset.wctime;
+    /* 先同步更新选中态，点击立刻有反馈 */
     $$('[data-wctime]', body).forEach(b => b.classList.toggle('active', b === btn));
-    drawWordCloud();
+    /* 再清空旧图并显示「正在统计…」，把重算与重绘推迟到下一个任务，避免阻塞点击 */
+    wcShowLoading();
+    setTimeout(() => drawWordCloud(), 50);
   }));
   $$('[data-wcwho]', body).forEach(btn => btn.addEventListener('click', () => {
     if (wcWhoTab === btn.dataset.wcwho) return;
     wcWhoTab = btn.dataset.wcwho;
     $$('[data-wcwho]', body).forEach(b => b.classList.toggle('active', b === btn));
-    drawWordCloud();
+    wcShowLoading();
+    setTimeout(() => drawWordCloud(), 50);
   }));
   /* 等布局稳定后再量 canvas 实际宽度，避免 backing store 拉伸模糊 */
   requestAnimationFrame(() => drawWordCloud());
@@ -8700,7 +8719,7 @@ function drawWordCloud() {
     return;
   }
 
-  /* ② 取数 + 词频统计 → 严格清洗成 [['词语', 频次], ...] 数组，最多 40 个词 */
+  /* ② 取数 + 词频统计 → 严格清洗成 [['词语', 频次], ...] 数组，只保留 Top 10 */
   const texts = wcCollectTexts(wcRoleId || state.activeRoleId, wcTimeTab, wcWhoTab);
   const list = wcSanitizeList(wcBuildList(texts));
   if (!list.length) {
@@ -8747,7 +8766,10 @@ function drawWordCloud() {
       WordCloud(canvas, {
         list,
         gridSize: 16,        /* 网格放大到 16：词少、格子大，布局算法不会死循环 */
-        weightFactor: 0.5,   /* 字号权重压到 0.5：高频词也不会撑爆画布 */
+        weightFactor: function (count) {
+          /* 字号随频次增长，但最高封顶 40px：防止某个词大到占满画布、其它词排不下 */
+          return Math.min(40, Math.max(12, count * 0.5));
+        },
         fontFamily: 'sans-serif',
         fontWeight: 600,
         color: function () {
