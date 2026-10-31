@@ -8257,8 +8257,8 @@ function generateCustomGift() {
 function taSendGift(roleId) {
   const role = roleById(roleId);
   if (!role) return;
-  /* 30% 概率送「TA 自创礼物」（无需礼物库，不扣钱包）；否则从礼物库随机挑 */
-  const useCustom = Math.random() < 0.3;
+  /* 70% 概率送「TA 自创礼物」（无需礼物库，不扣钱包）；否则从礼物库随机挑 */
+  const useCustom = Math.random() < 0.7;
   let giftName, emoji, price, isCustom;
   if (useCustom) {
     const cg = generateCustomGift();
