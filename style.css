@@ -1652,6 +1652,19 @@ canvas.gmk{display:block;width:100%;aspect-ratio:1/1;touch-action:manipulation;c
 /* 转账：TA转来可收款 */
 .rp-claim{margin-top:10px;background:#fff;color:var(--theme-card-text,var(--primary));border-radius:9px;padding:6px 0;font-size:12.5px;font-weight:700;text-align:center;display:block;width:100%;border:0;letter-spacing:.3px;}
 .rp-claim:active{opacity:.8;}
+/* 退回卡片（24小时未领取自动退回）：比已接收浅色更淡的灰白调，不再有主题色边框/阴影/渐变 */
+.redpacket-bubble.card-returned{
+  background-color:#f0f0f0 !important;
+  background-image:none !important;   /* 必须覆盖基础卡的 !important 主题渐变，否则灰底上仍透出主题色 */
+  color:#a0a0a0 !important;
+  border:1px solid #e0e0e0 !important;
+  box-shadow:none !important;
+  opacity:.8;
+}
+.redpacket-bubble.card-returned .rp-title,
+.redpacket-bubble.card-returned .rp-amount,
+.redpacket-bubble.card-returned .rp-note,
+.redpacket-bubble.card-returned .rp-state{color:#a0a0a0 !important;}
 .rp-done{margin-top:10px;background:rgba(255,255,255,.22);border-radius:9px;padding:6px 0;font-size:12px;text-align:center;color:#fff;}
 
 /* 聊天页送礼面板：与转账面板统一的圆角浅底、细边框、轻阴影 */

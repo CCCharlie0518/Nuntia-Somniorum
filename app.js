@@ -730,6 +730,8 @@ function mergeState(saved) {
     const rec = (h && typeof h === 'object') ? h : {};
     /* 旧送礼记录没有接收状态时，按已收下处理（浅色卡片） */
     const claimed = typeof rec.claimed === 'boolean' ? rec.claimed : true;
+    /* 状态三值：pending 待收下 / claimed 已收下 / returned 已退回（24h 未领取自动退回） */
+    const status = rec.status === 'returned' ? 'returned' : (claimed ? 'claimed' : 'pending');
     return {
       id: rec.id || uid(),
       roleId: rec.roleId || '',
@@ -739,17 +741,20 @@ function mergeState(saved) {
       price: Math.max(0, Math.round((Number(rec.price) || 0) * 100) / 100),
       note: String(rec.note || ''),
       direction: rec.direction === 'in' ? 'in' : 'out',
+      status,
       claimed,
       claimedAt: Number(rec.claimedAt) || 0,
+      createTime: Number(rec.createTime) || rec.ts || Date.now(),  /* 24h 退回计时起点；旧数据用 ts 兜底 */
       ts: rec.ts || Date.now()
     };
   });
   out.redPackets = out.redPackets.map(r => {
     const rec = (r && typeof r === 'object') ? r : {};
-    /* 旧转账记录按原状态还原；完全没有状态字段时默认已接收（浅色卡片） */
-    const hasState = ['pending', 'claimed'].includes(rec.status) || typeof rec.claimed === 'boolean';
+    /* 旧转账记录按原状态还原；完全没有状态字段时默认已接收（浅色卡片）；
+       状态三值：pending 待收款 / claimed 已收款 / returned 已退回（24h 未领取自动退回） */
+    const hasState = ['pending', 'claimed', 'returned'].includes(rec.status) || typeof rec.claimed === 'boolean';
     const status = hasState
-      ? ((rec.status === 'claimed' || rec.claimed === true) ? 'claimed' : 'pending')
+      ? (rec.status === 'returned' ? 'returned' : ((rec.status === 'claimed' || rec.claimed === true) ? 'claimed' : 'pending'))
       : 'claimed';
     return {
       id: rec.id || uid(),
@@ -762,6 +767,7 @@ function mergeState(saved) {
       status,
       claimed: status === 'claimed',
       claimedAt: Number(rec.claimedAt) || 0,
+      createTime: Number(rec.createTime) || rec.ts || Date.now(),  /* 24h 退回计时起点；旧数据用 ts 兜底 */
       ts: rec.ts || Date.now()
     };
   });
@@ -2639,34 +2645,36 @@ function renderChatMessages() {
       </div>`;
     } else if (m.type === 'redpacket') {
       const incoming = m.direction === 'in';
+      const returned = m.returned === true;   /* 24h 未领取已退回：灰白卡片，不可再收款 */
       const claimed = m.claimed === true;
       const extra = m.count > 1 ? ` · ${m.count} 个` : '';
-      const status = m.receivedCard ? '已收款' : (claimed ? (incoming ? '已收款' : dn + '已收款') : '待收款');
+      const status = returned ? '已退回' : (m.receivedCard ? '已收款' : (claimed ? (incoming ? '已收款' : dn + '已收款') : '待收款'));
       const amtNum = Math.round((Number(m.amount) || 0) * 100) / 100;
       const amtTxt = Number.isInteger(amtNum) ? String(amtNum) : amtNum.toFixed(2);
       const amtLen = amtTxt.replace('-', '').length;
       const amtCls = amtLen >= 7 ? ' xlong' : (amtLen >= 5 ? ' long' : '');
-      inner = `<div class="bubble redpacket-bubble ${claimed ? 'rp-received' : 'rp-pending'}">
+      inner = `<div class="bubble redpacket-bubble ${returned ? 'card-returned' : (claimed ? 'rp-received' : 'rp-pending')}">
         ${quoteHTML}
         <div class="rp-title">转账</div>
         <div class="rp-amount${amtCls}">¥ ${esc(amtTxt)}</div>
         <div class="rp-note">${esc(m.blessing || '转账')}</div>
-        ${incoming && !claimed
+        ${incoming && !claimed && !returned
           ? `<button class="rp-claim" data-rpclaim="${m.id}">收款</button>`
           : `<div class="rp-state">${esc(status)}${extra}</div>`}
       </div>`;
     } else if (m.type === 'gift') {
       const incoming = m.direction === 'in';
+      const returned = m.returned === true;   /* 24h 未领取已退回：灰白卡片，不可再收下 */
       const claimed = m.claimed === true;
       const price = Math.max(0, Math.round((Number(m.price) || 0) * 100) / 100);
       const noteTxt = String(m.note || '').trim() || (price > 0 ? money(price) : '心意');
-      const status = m.receivedCard ? '已收下' : (claimed ? (incoming ? '已收下' : dn + '已收下') : '待收下');
-      inner = `<div class="bubble redpacket-bubble gift-bubble ${claimed ? 'rp-received' : 'rp-pending'}">
+      const status = returned ? '已退回' : (m.receivedCard ? '已收下' : (claimed ? (incoming ? '已收下' : dn + '已收下') : '待收下'));
+      inner = `<div class="bubble redpacket-bubble gift-bubble ${returned ? 'card-returned' : (claimed ? 'rp-received' : 'rp-pending')}">
         ${quoteHTML}
         <div class="rp-title">送礼物</div>
         <div class="rp-amount gift-name">${esc(m.emoji || '🎁')} ${esc(m.giftName || '礼物')}</div>
         <div class="rp-note">${esc(noteTxt)}</div>
-        ${incoming && !claimed
+        ${incoming && !claimed && !returned
           ? `<button class="rp-claim" data-giftclaim="${m.id}">收下</button>`
           : `<div class="rp-state">${esc(status)}</div>`}
       </div>`;
@@ -4766,20 +4774,27 @@ function renderHomePage() {
   }));
 
   /* 左右滑动 / 圆点切换分页；滑动后抑制误触点击。
-     安卓修复：touch-action:pan-y（CSS）保证横向手势不被浏览器抢走；
-     setPointerCapture 保证手指滑出元素/屏幕边缘时 move、up 事件依然送达 */
+     安卓修复：touch-action:pan-y（CSS）保证横向手势不被浏览器抢走。
+     关键教训：绝不能 pointerdown 就 setPointerCapture —— click 也是 PointerEvent，
+     捕获会把 click 重定向到 pager 本身，电脑端所有桌面图标点击全部失效（本次回归根因）。
+     正确做法：确认是横向翻页手势后再捕获，普通点击不受影响 */
   const pager = $('#homePager');
   let swX = 0, swY = 0, swOn = false, swMoved = false;
   pager.addEventListener('pointerdown', e => {
     if (homeEditMode) { swOn = false; return; }
     swOn = true; swMoved = false; swX = e.clientX; swY = e.clientY;
-    try { pager.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
   });
   pager.addEventListener('pointermove', e => {
     if (!swOn) return;
     const dx = e.clientX - swX, dy = e.clientY - swY;
     /* 方向判定：只有横向位移明显大于纵向才视为翻页手势，纵向滑动不干预（也不 preventDefault） */
-    if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy)) swMoved = true;
+    if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy)) {
+      if (!swMoved) {
+        swMoved = true;
+        /* 确认横向滑动手势后才捕获指针：滑动途中 move/up 稳定送达（安卓），点击场景走不到这里 */
+        try { pager.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      }
+    }
   });
   const swEnd = e => {
     if (!swOn) return;
@@ -6758,7 +6773,8 @@ function sendRedPacket(roleId, amount, blessing, count) {
   }
   const rec = {
     id: uid(), roleId, roleName: role.name,
-    amount, blessing, count, direction: 'out', status: 'pending', claimed: false, ts: Date.now()
+    amount, blessing, count, direction: 'out', status: 'pending', claimed: false,
+    createTime: Date.now(), ts: Date.now()
   };
   state.redPackets.unshift(rec);
   const msg = {
@@ -6796,10 +6812,14 @@ function sendRedPacket(roleId, amount, blessing, count) {
 function claimRedPacket(roleId, msgId) {
   const msgs = chatOf(roleId);
   const msg = msgs.find(m => m.id === msgId);
-  if (!msg || msg.type !== 'redpacket' || msg.direction !== 'in' || msg.claimed) return;
+  /* 已退回的卡片不可再收款 */
+  if (!msg || msg.type !== 'redpacket' || msg.direction !== 'in' || msg.claimed || msg.returned) return;
   msg.claimed = true;
   const rec = state.redPackets.find(r => r.id === msg.redPacketId);
-  if (rec) { rec.status = 'claimed'; rec.claimed = true; rec.claimedAt = Date.now(); }
+  if (rec) {
+    if (rec.status === 'returned') return;
+    rec.status = 'claimed'; rec.claimed = true; rec.claimedAt = Date.now();
+  }
   /* 收款入钱包 */
   const claimRole = roleById(roleId);
   walletEarn(msg.amount, '来自 ' + (claimRole ? claimRole.name : taName()) + ' 的转账', '', claimRole);
@@ -6846,7 +6866,8 @@ function taSendRedPacket(roleId) {
   const blessing = composeCardText(roleId) || '一点心意，收下吧';
   const rec = {
     id: uid(), roleId, roleName: role.name,
-    amount, blessing, count: 1, direction: 'in', status: 'pending', claimed: false, ts: Date.now()
+    amount, blessing, count: 1, direction: 'in', status: 'pending', claimed: false,
+    createTime: Date.now(), ts: Date.now()
   };
   state.redPackets.unshift(rec);
   chatOf(roleId).push({
@@ -6919,6 +6940,76 @@ function walletEarn(amount, title, note, role) {
   walletLog('in', amt, title, note, role);
 }
 
+/* ===== 24小时未领取自动退回：转账与礼物 =====
+   触发时机：boot（DOMContentLoaded）+ 每 15 秒轮询（与 checkTaRedPackets 等同组）。
+   规则：我发出未领取 → 金额退回我的钱包并记一笔「退回」流水；TA 发来未领取 → 仅改状态不动钱包 */
+const TX_EXPIRE_MS = 24 * 60 * 60 * 1000;
+function checkExpiredTransactions() {
+  if (!state) return;
+  /* 外层兜底：本函数出现任何异常都不允许影响页面加载、渲染与点击绑定 */
+  try {
+    const now = Date.now();
+    const touchedRoles = new Set();
+    let returnedCount = 0, refundCount = 0;
+
+    /* 把聊天里引用该记录的原卡片标记为已退回（不影响已接收的浅色补卡） */
+    const markMsgsReturned = (roleId, idKey, recordId) => {
+      const msgs = state.chats[roleId];
+      if (!Array.isArray(msgs)) return;
+      msgs.forEach(m => {
+        if (m && m[idKey] === recordId && !m.receivedCard) { m.returned = true; m.read = true; }
+      });
+    };
+
+    /* 时间戳严格容错：无有效 createTime/ts 的记录直接跳过，绝不参与运算 */
+    const expiredAt = rec => {
+      const t0 = rec && (Number(rec.createTime) || Number(rec.ts) || 0);
+      if (!(t0 > 0)) return false;              /* createTime 缺失/非法 → 不算超时 */
+      return (now - t0) > TX_EXPIRE_MS;
+    };
+
+    /* 转账：仅处理仍为待收款且超时的记录；单条异常跳过，不影响其它记录 */
+    (Array.isArray(state.redPackets) ? state.redPackets : []).forEach(r => {
+      try {
+        if (!r || r.status !== 'pending') return;
+        if (!expiredAt(r)) return;
+        r.status = 'returned'; r.claimed = false; r.returnedAt = now;
+        if (r.direction === 'out') {
+          walletEarn(r.amount, '转账退回', r.blessing || '转账', roleById(r.roleId));
+          refundCount++;
+        }
+        markMsgsReturned(r.roleId, 'redPacketId', r.id);
+        touchedRoles.add(r.roleId);
+        returnedCount++;
+      } catch (err) { /* 单条数据异常：跳过 */ }
+    });
+
+    /* 礼物：未收下且超时的记录（status/claimed 双字段，任一已终态即跳过） */
+    (Array.isArray(state.giftHistory) ? state.giftHistory : []).forEach(g => {
+      try {
+        if (!g || g.claimed === true || g.status === 'claimed' || g.status === 'returned') return;
+        if (!expiredAt(g)) return;
+        g.status = 'returned'; g.returnedAt = now;
+        if (g.direction === 'out' && Number(g.price) > 0) {
+          walletEarn(g.price, '礼物退回：' + g.giftName, '', roleById(g.roleId));
+          refundCount++;
+        }
+        markMsgsReturned(g.roleId, 'giftRecordId', g.id);
+        touchedRoles.add(g.roleId);
+        returnedCount++;
+      } catch (err) { /* 单条数据异常：跳过 */ }
+    });
+
+    if (!returnedCount) return;
+    persist();
+    /* 只做局部更新：相关聊天页重渲染 + 当前停留的钱包/礼物页重渲染，不触发全量 render */
+    touchedRoles.forEach(rid => { try { renderChatIf(rid); } catch (err) { /* 忽略 */ } });
+    if (currentRoute.page === 'sub' && currentRoute.name === 'wallet') renderWalletPage();
+    if (currentRoute.page === 'sub' && currentRoute.name === 'gifts') renderGiftPage();
+    showToast(refundCount > 0 ? '有转账/礼物超时未领取，已退回你的钱包' : '有一笔转账/礼物已超时退回');
+  } catch (err) { /* 兜底：任何异常静默，保证 UI 与交互不受影响 */ }
+}
+
 function renderWalletPage() {
   const dn = taName();
   /* 合并资金流水：转账记录（state.redPackets，方向 in/out）+ 钱包收支（礼物扣款等）。
@@ -6929,7 +7020,7 @@ function renderWalletPage() {
     direction: r.direction === 'in' ? 'in' : 'out',
     amount: Number(r.amount || 0),
     note: r.blessing || '',
-    status: r.status === 'claimed' ? '已收款' : '待收款',
+    status: r.status === 'claimed' ? '已收款' : (r.status === 'returned' ? '已退回' : '待收款'),
     roleName: r.roleName || dn,
     ts: Number(r.ts || 0)
   })).concat(walletTransactions()
@@ -8085,7 +8176,8 @@ function sendGift(roleId, giftId, note) {
   const rec = {
     id: uid(), roleId, roleName: role.name,
     giftName: gift.name, emoji: gift.emoji || '🎁', price,
-    direction: 'out', claimed: false, note: String(note || ''), ts: Date.now()
+    direction: 'out', status: 'pending', claimed: false, note: String(note || ''),
+    createTime: Date.now(), ts: Date.now()
   };
   state.giftHistory.unshift(rec);
   if (state.giftHistory.length > 300) state.giftHistory.length = 300;
@@ -8105,7 +8197,7 @@ function sendGift(roleId, giftId, note) {
     if (!roleById(roleId)) return;
     msg.claimed = true;
     const r = state.giftHistory.find(g => g.id === rec.id);
-    if (r) { r.claimed = true; r.claimedAt = Date.now(); }
+    if (r) { r.claimed = true; r.claimedAt = Date.now(); r.status = 'claimed'; }
     /* 第二步：TA 在 TA 那一侧新增一张浅色已收下卡片 */
     pushReceivedCard(roleId, 'gift', rec.id, 'ta', {
       giftName: rec.giftName, emoji: rec.emoji, price: rec.price, note: rec.note
@@ -8186,7 +8278,8 @@ function taSendGift(roleId) {
   const rec = {
     id: uid(), roleId, roleName: role.name,
     giftName, emoji, price,
-    direction: 'in', claimed: false, note: '', ts: Date.now(),
+    direction: 'in', status: 'pending', claimed: false, note: '',
+    createTime: Date.now(), ts: Date.now(),
     isCustom                          /* 标记是否为 TA 自创礼物 */
   };
   state.giftHistory.unshift(rec);
@@ -8223,11 +8316,15 @@ function taSendGift(roleId) {
 function claimGift(roleId, msgId) {
   const msgs = chatOf(roleId);
   const msg = msgs.find(m => m.id === msgId);
-  if (!msg || msg.type !== 'gift' || msg.direction !== 'in' || msg.claimed) return;
+  /* 已退回的卡片不可再收下 */
+  if (!msg || msg.type !== 'gift' || msg.direction !== 'in' || msg.claimed || msg.returned) return;
   msg.claimed = true;
   msg.read = true;
   const rec = state.giftHistory.find(g => g.id === msg.giftRecordId);
-  if (rec) { rec.claimed = true; rec.claimedAt = Date.now(); }
+  if (rec) {
+    if (rec.status === 'returned') return;
+    rec.claimed = true; rec.claimedAt = Date.now(); rec.status = 'claimed';
+  }
   /* 第二步：我在我那一侧新增一张浅色已收下卡片；原卡片留在 TA 一侧并已变浅 */
   pushReceivedCard(roleId, 'gift', msg.giftRecordId, 'user', {
     giftName: msg.giftName, emoji: msg.emoji, price: msg.price, note: msg.note
@@ -11873,7 +11970,7 @@ function renderStoragePage() {
       <div class="stat-cell"><div class="num">${state.pomodoro.records.length}</div><div class="lbl">专注记录</div></div>
       <div class="stat-cell"><div class="num">${state.redPackets.length}</div><div class="lbl">转账记录</div></div>
       <div class="stat-cell"><div class="num">${state.todos.length}</div><div class="lbl">待办</div></div>
-      <div class="stat-cell"><div class="num">${state.redPackets.filter(r => r.status !== 'claimed').length + state.giftHistory.filter(g => g.claimed === false).length}</div><div class="lbl">待接收</div></div>
+      <div class="stat-cell"><div class="num">${state.redPackets.filter(r => r.status === 'pending').length + state.giftHistory.filter(g => g.claimed !== true && g.status !== 'claimed' && g.status !== 'returned').length}</div><div class="lbl">待接收</div></div>
       <div class="stat-cell"><div class="num">${state.redPackets.filter(r => r.direction === 'in').length}</div><div class="lbl">${esc(taName())}转来</div></div>
       <div class="stat-cell"><div class="num">${state.ledger.length}</div><div class="lbl">记账记录</div></div>
       <div class="stat-cell"><div class="num">${state.anniversaries.length}</div><div class="lbl">纪念日</div></div>
@@ -14172,6 +14269,8 @@ async function boot() {
   checkTaSpacePosts();
   checkTaReadInvite();  /* 一起读书：TA 主动邀请共读 */
   checkTodoReminders(); /* 页面加载完成时立刻补查一次错过的待办提醒 */
+  /* 24h 退回检查：延迟到 UI 渲染与全部事件绑定完成之后执行，绝不阻塞基础交互 */
+  setTimeout(() => { try { checkExpiredTransactions(); } catch (e) { /* 忽略 */ } }, 800);
   setInterval(() => {
     checkLetterReplies();
     checkAutoLetters();
@@ -14184,6 +14283,7 @@ async function boot() {
     checkTaSpacePosts();
     checkTaReadInvite();
     checkTodoReminders();
+    try { checkExpiredTransactions(); } catch (e) { /* 容错：单次异常不影响后续轮询与其它任务 */ }
   }, 15000);
 
   /* 刷新后若保活开关为开启：浏览器通常会在无手势时拦截播放，
