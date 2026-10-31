@@ -1,6 +1,9 @@
 
 'use strict';
 
+/* 全局版本号：显示在设置页最底部；日后发版只需改这一处 */
+const APP_VERSION = 'v7.5.0';
+
 /* =========================================================
  * 一、基础工具函数
  * ========================================================= */
@@ -4307,7 +4310,6 @@ const HOME_APPS = [
   { route: 'gifts', label: '送礼物' },
   { route: 'pat', label: '拍一拍' },
   { route: 'pet', label: '桌面宠物' },
-  { route: 'games', label: '小游戏' },
   { route: 'readtogether', label: '一起做' },
   { route: 'reminder', label: '提醒' },
   { route: 'settings', label: '设置' }
@@ -8455,7 +8457,8 @@ function renderSub(name) {
     case 'gifts': return renderGiftPage();
     case 'pat': return renderPatPage();
     case 'pet': return renderPetPage();
-    case 'games': return renderGamesPage();
+    case 'play': return renderPlayPage();            /* 一起玩：一起做 → 一起玩 → 五子棋 的二级页 */
+    case 'games': return renderPlayPage();           /* 旧路由兜底：桌面小游戏已并入【一起玩】 */
     case 'readtogether': return renderReadTogetherPage();
     case 'listen': return renderListenPage();
     case 'reading': return renderReadingPage();
@@ -10757,19 +10760,20 @@ function collectQuiz() {
 }
 
 /* =========================================================
- * 小游戏中心
+ * 一起玩（三级结构的二级页：一起做 → 一起玩 → 五子棋）
+ * 返回键走默认 goBack：由【一起做】navigate 进入，弹栈自然回到一起做
  * ========================================================= */
-function renderGamesPage() {
-  const body = subShell('小游戏', `
+function renderPlayPage() {
+  const body = subShell('一起玩', `
     <div class="panel">
-      <button class="game-entry" id="gameGomoku">
+      <button class="game-entry" id="playGomoku">
         <span class="ge-ic">${APP_ICONS.gomoku}</span>
         <span class="ge-info"><b>五子棋</b><span class="muted">黑白对弈 · 和 ${esc(taName())} 下一局</span></span>
         <span class="ge-go">›</span>
       </button>
     </div>
     <div class="muted" style="text-align:center;margin-top:10px">更多小游戏筹备中…</div>`);
-  $('#gameGomoku', body).addEventListener('click', () => navigate({ page: 'sub', name: 'gomoku' }));
+  $('#playGomoku', body).addEventListener('click', () => navigate({ page: 'sub', name: 'gomoku' }));
 }
 
 /* =========================================================
@@ -10871,6 +10875,22 @@ function renderGomokuPage() {
   $('#gmkWhite').addEventListener('click', () => gmkSetColor(2));
   $('#gmkUndo').addEventListener('click', gmkUndo);
   $$('[data-gmkatt]', body).forEach(btn => btn.addEventListener('click', () => gmkSetAttitude(btn.dataset.gmkatt)));
+  /* 返回固定回到【一起玩】二级页（三级结构：一起做 → 一起玩 → 五子棋）。
+     与一起专注同一模式：cloneNode 换掉 subShell 绑定的 goBack，再按路由栈决定返回目标 */
+  const back = $('#page-sub [data-back]');
+  if (back) {
+    const fresh = back.cloneNode(true);
+    back.replaceWith(fresh);
+    fresh.addEventListener('click', () => {
+      const prev = routeStack[routeStack.length - 1];
+      if (prev && prev.page === 'sub' && prev.name === 'play') {
+        goBack();
+      } else {
+        currentRoute = { page: 'sub', name: 'play' };
+        applyRoute();
+      }
+    });
+  }
   /* 重新进入已结束的对局：恢复终局文案与结算卡片 */
   if (gmk.over) { gmkPaintFinalStatus(); gmkShowResult(gmk.result, gmk.resultSpeech); return; }
   /* 玩家执白（后手）时，进入页面由 TA 执黑先行 */
@@ -12537,7 +12557,7 @@ function renderSettingsPage() {
       </div>`;
   }).join('');
 
-  subShell('设置', `
+  const body = subShell('设置', `
     <div class="panel">
       <div class="panel-title">我的资料</div>
       <div class="avatar-edit">
@@ -12616,7 +12636,11 @@ function renderSettingsPage() {
     <div class="tip-box">
       ${esc(state.appName)} · 本地持久化 + 导出备份<br>
       所有数据只保存在当前浏览器中，不会上传；更换设备或清理浏览器数据前请先导出备份。
-    </div>`);
+    </div>
+    <div id="app-version-display" class="app-version-text"></div>`);
+
+  /* 版本号显示：内容来自文件顶部全局常量 APP_VERSION */
+  $('#app-version-display', body).textContent = '当前版本：' + APP_VERSION;
 
   $('#editMe').addEventListener('click', openMyProfileEditor);
   $('#settingsAddRole').addEventListener('click', () => openRoleEditor(null));
@@ -13078,6 +13102,14 @@ function renderReadTogetherPage() {
       </div>
       <div class="arrow">›</div>
     </button>
+    <button class="rt-entry-card" data-rt-play>
+      <div class="ic">${APP_ICONS.games}</div>
+      <div class="txt">
+        <div class="t">一起玩</div>
+        <div class="d">五子棋 · 更多小游戏筹备中</div>
+      </div>
+      <div class="arrow">›</div>
+    </button>
     <div class="rt-more">更多一起做功能，敬请期待…</div>
   `);
   const entry = $('[data-rt-read]', body);
@@ -13091,6 +13123,9 @@ function renderReadTogetherPage() {
   if (listenEntry) listenEntry.addEventListener('click', () => navigate({ page: 'sub', name: 'listen' }));
   const focusEntry = $('[data-rt-focus]', body);
   if (focusEntry) focusEntry.addEventListener('click', () => navigate({ page: 'sub', name: 'pomodoro' }));
+  /* 一起玩：进入二级子页面（三级结构：一起做 → 一起玩 → 五子棋） */
+  const playEntry = $('[data-rt-play]', body);
+  if (playEntry) playEntry.addEventListener('click', () => navigate({ page: 'sub', name: 'play' }));
 }
 
 /* ---------- 【一起读书】主界面 ---------- */
