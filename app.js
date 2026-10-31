@@ -8478,10 +8478,10 @@ function renderSub(name) {
 /* =========================================================
  * 十三·三、互动词云（聊天页右上角快捷菜单进入）
  * 纯前端轻量词频统计，无后端分词：
- * ① 只保留连续中文片段（标点/表情/字母/数字一律当分隔）
- * ② 滑动窗口提取 2~4 字词组
+ * ① 只用超级正则 split 切分（空白 + 全部中英文标点与特殊符号），全程无 while 循环
+ * ② 2~6 字的纯中文片段全部计入频次，不做任何数量截断（全量统计）
  * ③ 剔除「的、了、是、在、我、你、他、这、那、就」等停用单字组成的词与显式停用词
- * ④ 频次排序 + 子串去重，取前 60 个交给 wordcloud2.js 渲染
+ * ④ 频次降序排序，仅在最终渲染阶段取前 10 名交给 wordcloud2.js 与排行榜
  * ========================================================= */
 let wcTimeTab = 'week';   /* today 今日 / week 本周 / month 本月，默认本周 */
 let wcWhoTab = 'ta';      /* ta TA说的 / me 我说的，默认 TA 说的 */
@@ -8504,9 +8504,9 @@ const WC_STOP_WORDS = new Set([
 /* 只由这些单字组成的词（如「我你」）同样无意义，整段丢弃 */
 const WC_STOP_CHARS = new Set(Array.from(WC_STOP_WORDS));
 
-/* 词数硬上限 10（词云与排行榜都只用 Top 10，数据量越小渲染越稳）；
- * 单条消息 5000 字、全部文本 20000 字，超长一律截断 */
-const WC_MAX_WORDS = 10;
+/* 显示上限：统计阶段一律全量累加，只有传给 WordCloud 与排行榜时才截取前 10 名；
+ * 单条消息 5000 字、全部文本 20000 字，超长一律截断（这是文本量预算，不限制词数） */
+const WC_TOP_N = 10;
 const WC_MAX_TEXT_LEN = 5000;
 const WC_MAX_TOTAL_CHARS = 20000;
 
@@ -8586,9 +8586,10 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
   }).map(m => wcMsgText(m));
 }
 
-/* 最简词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15]] 格式
+/* 最简词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15], ...] 格式
  * 全程只有 split + forEach，没有任何 while 循环，结构上不可能死循环
- * 规则：超级正则切分 → 只保留汉字 → 2~6 字且非停用词的片段计数 → 降序取前 10 */
+ * 规则：超级正则切分 → 只保留汉字 → 2~6 字且非停用词的片段全部计数（不截断）
+ * 注意：这里只做全量统计 + 降序排序，截取前 10 名留给渲染阶段（drawWordCloud） */
 function wcBuildList(texts) {
   const freq = Object.create(null);
   let budget = WC_MAX_TOTAL_CHARS;   /* 总字符预算：超长文本叠加也不会拖死主线程 */
@@ -8604,19 +8605,19 @@ function wcBuildList(texts) {
       const clean = wcCleanFragment(piece);              /* 纯数字/字母/emoji/符号 → 空串 */
       if (clean.length < 2 || clean.length > 6) return;  /* 只保留 2~6 字自然短语 */
       if (wcIsStopWord(clean)) return;                   /* 过滤停用词 */
-      freq[clean] = (freq[clean] || 0) + 1;
+      freq[clean] = (freq[clean] || 0) + 1;              /* 所有合格词全量累加，不设词数上限 */
     });
   });
 
+  /* 转为数组后按频次降序排序（同频时长词优先），此处不截断 */
   return Object.keys(freq)
     .map(w => [w, freq[w]])
-    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)  /* 频次降序，同频长词优先 */
-    .slice(0, WC_MAX_WORDS);                                   /* 只留 Top 10，绝不多传 */
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);
 }
 
 /* 渲染前数据清洗（词云库与排行榜共用）：
  * 只接受 [['词语', 正数频次], ...] 的数组格式，剔除空词、NaN / undefined / null / 非正数频次，
- * 按频次降序后只取前 10 个 —— 词数过多或格式异常都会让 wordcloud2.js 卡死 */
+ * 按频次降序排序；不截断，由调用方在真正渲染时取前 10 */
 function wcSanitizeList(list) {
   const out = [];
   (Array.isArray(list) ? list : []).forEach(item => {
@@ -8628,7 +8629,7 @@ function wcSanitizeList(list) {
     out.push([word, count]);
   });
   out.sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);
-  return out.slice(0, WC_MAX_WORDS);
+  return out;
 }
 
 /* 切换筛选时的过渡态：立刻清空旧画布并显示「正在统计…」，
@@ -8667,7 +8668,7 @@ function renderWordCloudPage() {
       <button class="wc-tab ${wcWhoTab === 'me' ? 'active' : ''}" data-wcwho="me">我说的</button>
     </div>
     <div class="wc-stage">
-      <canvas id="wordcloud-canvas" style="width: 100%; height: 400px;"></canvas>
+      <canvas id="wordcloud-canvas"></canvas>
       <div class="wc-empty hidden" id="wcEmpty"></div>
     </div>
     <div class="wc-rank hidden" id="wcRank"></div>
@@ -8719,17 +8720,20 @@ function drawWordCloud() {
     return;
   }
 
-  /* ② 取数 + 词频统计 → 严格清洗成 [['词语', 频次], ...] 数组，只保留 Top 10 */
+  /* ② 取数 + 全量词频统计 → 严格清洗成 [['词语', 频次], ...] 完整列表（此阶段不截断） */
   const texts = wcCollectTexts(wcRoleId || state.activeRoleId, wcTimeTab, wcWhoTab);
-  const list = wcSanitizeList(wcBuildList(texts));
-  if (!list.length) {
+  const fullList = wcSanitizeList(wcBuildList(texts));
+  if (!fullList.length) {
     showEmpty(texts.length
       ? '这段时间的文字内容太少，暂时提取不出关键词，再多聊几句试试'
       : '这段时间还没有可统计的聊天文字，先去和 ' + dn + ' 说说话吧');
     return;
   }
 
-  /* ③ 渲染前保证 canvas 可见且有实际尺寸（之前隐藏过会导致宽高为 0，画出来是空白） */
+  /* ③ 只有最终渲染才截取前 10 名：词云与排行榜共用同一份 Top 10，统计结果本身是完整的 */
+  const list = fullList.slice(0, WC_TOP_N);
+
+  /* ④ 渲染前保证 canvas 可见且有实际尺寸（之前隐藏过会导致宽高为 0，画出来是空白） */
   showCanvas();
   /* 尺寸校验：容器未布局 / 被隐藏时宽高为 0，词云库会在内部无限计算，直接中止渲染 */
   if (!canvas.offsetWidth || !canvas.offsetHeight) {
@@ -8741,14 +8745,21 @@ function drawWordCloud() {
     const stage = canvas.parentElement;
     cssW = (stage && stage.clientWidth ? stage.clientWidth - 16 : 0) || 300;
   }
-  const cssH = 400;
-  /* 画布 1:1 像素（不再乘 dpr），配合 weightFactor 0.5 / gridSize 16，字号与布局都可预期 */
+  const cssH = Math.max(200, canvas.clientHeight || 400);
+  /* 画布 1:1 像素（不再乘 dpr），高度由 style.css 固定，保证排版有足够空间 */
   canvas.width = Math.max(1, Math.round(cssW));
-  canvas.height = Math.max(1, cssH);
+  canvas.height = Math.max(1, Math.round(cssH));
+  /* 重设 width/height 已会清空画布，这里再显式清一次，确保上一次的绘制不会残留叠加 */
+  try { canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height); } catch (err) { /* 忽略 */ }
 
-  /* 底部排行榜：与词云共用同一份词频数组，取前 10 名 */
+  /* ④ 动态字号区间：取 Top 10 里的最大 / 最小频次，把频次线性映射到 16px ~ 55px，
+   * 让最高频的词尽量撑满画布，最低频的词也保持可读（数据已按频次降序，首位即最大值） */
+  const maxCount = list[0][1];
+  const minCount = list[list.length - 1][1];
+
+  /* 底部排行榜：与词云共用同一份 Top 10 数组 */
   if (rankEl) {
-    const top = list.slice(0, 10);
+    const top = list;
     rankEl.innerHTML = `<div class="wc-rank-title">高频词 TOP ${top.length}</div>`
       + top.map(([w, n], i) => `<div class="wc-rank-row">
           <span class="wc-rank-no">${i + 1}</span>
@@ -8758,17 +8769,20 @@ function drawWordCloud() {
     rankEl.classList.remove('hidden');
   }
 
-  /* ④ 延迟 200ms 再画：先让页面与筛选按钮正常显示，避免一进词云页就白屏卡死 */
+  /* ⑤ 延迟 100ms 再画：先让页面与筛选按钮正常显示，避免一进词云页就白屏卡死 */
   setTimeout(() => {
     /* 过期任务直接作废；canvas 不在文档中（已返回/切页）也放弃本次渲染 */
     if (seq !== wcRenderSeq || !canvas.isConnected) return;
     try {
       WordCloud(canvas, {
         list,
-        gridSize: 16,        /* 网格放大到 16：词少、格子大，布局算法不会死循环 */
+        gridSize: 10,        /* 网格从 16 缩小到 10：排布更紧凑，更容易填满画布空隙 */
         weightFactor: function (count) {
-          /* 字号随频次增长，但最高封顶 40px：防止某个词大到占满画布、其它词排不下 */
-          return Math.min(40, Math.max(12, count * 0.5));
+          /* 频次全相同就没有区间可言，统一给中间大字号 */
+          if (maxCount === minCount) return 40;
+          /* 线性映射：最低频 16px，最高频约 55px，让 Top 词明显放大、撑满画布 */
+          const size = 16 + ((count - minCount) / (maxCount - minCount)) * 39;
+          return Math.min(55, Math.max(16, size));   /* 再夹一次，防极端数据越界 */
         },
         fontFamily: 'sans-serif',
         fontWeight: 600,
