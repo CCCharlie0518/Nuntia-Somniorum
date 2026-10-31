@@ -2,7 +2,7 @@
 'use strict';
 
 /* 全局版本号：显示在设置页最底部；日后发版只需改这一处 */
-const APP_VERSION = 'v7.6.0';
+const APP_VERSION = 'v7.7.0';
 
 /* =========================================================
  * 一、基础工具函数
@@ -1003,10 +1003,7 @@ function mergeState(saved) {
   out.quizTemplates = out.quizTemplates.map(t => ({
     id: t.id || uid(),
     title: String(t.title || '问卷'),
-    questions: (Array.isArray(t.questions) ? t.questions : []).map(q => ({
-      text: String((q && q.text) || ''),
-      options: (Array.isArray(q && q.options) ? q.options : []).map(o => String(o)).filter(Boolean)
-    })).filter(q => q.text && q.options.length),
+    questions: (Array.isArray(t.questions) ? t.questions : []).map(q => quizQuestionNormalize(q)).filter(q => q.text && q.options.length),
     ts: t.ts || Date.now()
   })).filter(t => t.questions.length);
 
@@ -3765,11 +3762,25 @@ function quizCardHTML(quiz, answers, hint, variant) {
 }
 
 function sendQuizAnswers(quiz, roleId) {
-  /* 按每题的可选数量随机抽选项（默认 1 个，即单选） */
+  /* 按每题的作答模式抽取选项：
+   * fixed  → 固定选 fixedCount 个；
+   * random → 在 randomMin ~ randomMax 之间随机取一个数量；
+   * 兼容旧数据（只有 pick / selectCount）时按固定选择处理；数量不得超过选项总数 */
   const answers = (quiz.questions || []).map(q => {
     const opts = q.options || [];
     if (!opts.length) return [];
-    const want = clamp(Math.round(Number(q.pick) || 1), 1, opts.length);
+    let want;
+    if (q.selectMode === 'random') {
+      const min = clamp(Math.round(Number(q.randomMin) || 1), 1, opts.length);
+      const max = clamp(Math.round(Number(q.randomMax) || min), min, opts.length);
+      want = Math.floor(Math.random() * (max - min + 1)) + min;
+    } else {
+      const legacy = q.fixedCount != null ? q.fixedCount
+        : (q.selectCount != null ? q.selectCount : (q.maxSelect != null ? q.maxSelect : q.pick));
+      want = clamp(Math.round(Number(legacy) || 1), 1, opts.length);
+    }
+    want = Math.min(want, opts.length);
+    /* 随机打乱后抽取 want 个下标 */
     const pool = opts.map((_, i) => i);
     const picks = [];
     for (let i = 0; i < want && pool.length; i++) {
@@ -8226,33 +8237,39 @@ function nextTaGiftDelay() {
   return randInt(240, 480) * 60 * 1000;
 }
 
+/* ===== TA 内置私藏礼物库（纯实体 / 购买类，与自创词库区分开） =====
+ * TA 主动送礼采用双轨制：50% 从这里抽一件实体礼物，50% 走自创拼接逻辑；
+ * 两条轨道都不扣用户钱包，价格恒为 0 */
+const builtInGifts = [
+  { name: "一束红玫瑰", emoji: "🌹" }, { name: "一杯热奶茶", emoji: "🧋" },
+  { name: "一盒巧克力", emoji: "🍫" }, { name: "一条纯银项链", emoji: "📿" },
+  { name: "一个毛绒小熊", emoji: "🧸" }, { name: "一盒精美糖果", emoji: "🍬" },
+  { name: "一台拍立得", emoji: "📸" }, { name: "一块草莓蛋糕", emoji: "🍰" },
+  { name: "两张电影票", emoji: "🎟️" }, { name: "一杯热美式", emoji: "☕" },
+  { name: "一条羊绒围巾", emoji: "🧣" }, { name: "一顿烛光晚餐", emoji: "🍱" },
+  { name: "一枚戒指", emoji: "💍" }, { name: "一副降噪耳机", emoji: "🎧" },
+  { name: "一个精美盲盒", emoji: "🎁" }, { name: "一束彩色气球", emoji: "🎈" },
+  { name: "一张游乐园门票", emoji: "🎫" }, { name: "一瓶香水", emoji: "🧴" },
+  { name: "一本装帧精美的书", emoji: "📖" }, { name: "一盒乐高积木", emoji: "🧱" }
+];
+
 /* ===== TA 自创礼物词库（通用，任何梦角人设都能代入） ===== */
 const customGiftPrefix = ["亲手折的", "特意为你定制的", "攒了很久买的", "藏在口袋里带过来的", "熬夜为你做的", "逛街时一眼看中的", "偷偷捡回来的", "从很远的远方带回来的", "用体温焐热的", "路边摘的", "自己录制的", "不好意思拿出手的", "准备了很久的", "下雨天捡到的", "用心写的", "小心翼翼包好的", "跑了好远去买的", "一直收藏着的", "悄悄塞进你包里的", "第一次做给你的"];
 const customGiftItems = [
-  { name: "一朵小花", emoji: "🌸" }, { name: "手写情书", emoji: "💌" },
+  { name: "一朵路边的小花", emoji: "🌸" }, { name: "手写情书", emoji: "💌" },
   { name: "平安符", emoji: "🧿" }, { name: "千纸鹤", emoji: "🕊️" },
-  { name: "小星星", emoji: "⭐" }, { name: "一片落叶", emoji: "🍂" },
-  { name: "糖果", emoji: "🍬" }, { name: "一个拥抱", emoji: "🫂" },
-  { name: "一个晚安吻", emoji: "💋" }, { name: "他的外套", emoji: "🧥" },
-  { name: "他的围巾", emoji: "🧣" }, { name: "一枚硬币", emoji: "🪙" },
-  { name: "满天星辰", emoji: "🌌" }, { name: "一首歌", emoji: "🎵" },
-  { name: "一段录音", emoji: "🎙️" }, { name: "一个承诺", emoji: "🤙" },
-  { name: "他的发丝", emoji: "🪮" }, { name: "一个钥匙扣", emoji: "🔑" },
-  { name: "一本写满你的日记", emoji: "📔" }, { name: "一片秋天的枫叶", emoji: "🍁" },
-  { name: "一根红线", emoji: "🧵" }, { name: "他的护身符", emoji: "📿" },
-  { name: "一个专属树洞", emoji: "🌳" }, { name: "陪你的一整天", emoji: "🌞" },
-  { name: "一杯热奶茶", emoji: "🧋" }, { name: "一束玫瑰", emoji: "🌹" },
-  { name: "一盒巧克力", emoji: "🍫" }, { name: "一条手链", emoji: "📿" },
-  { name: "一个小玩偶", emoji: "🧸" }, { name: "他珍贵的徽章", emoji: "🎖️" },
-  { name: "一张写满字的便利贴", emoji: "📝" }, { name: "一场烟花", emoji: "🎆" }
-];
-/* 自创礼物附带的前缀句（第二条气泡） */
-const customGiftPrefixPhrases = [
-  "这是我自己做的，希望你喜欢。",
-  "没花钱，但是心意是真的。",
-  "专门为你准备的，不许嫌弃哦。",
-  "虽然不值钱，但我想了很久。",
-  "给你，别告诉别人。"
+  { name: "折纸小星星", emoji: "⭐" }, { name: "一片秋天的落叶", emoji: "🍂" },
+  { name: "一个紧紧的拥抱", emoji: "🫂" }, { name: "一个晚安吻", emoji: "💋" },
+  { name: "他的外套", emoji: "🧥" }, { name: "他随身的围巾", emoji: "🧣" },
+  { name: "一枚许愿硬币", emoji: "🪙" }, { name: "满天星辰", emoji: "🌌" },
+  { name: "他唱的一首歌", emoji: "🎵" }, { name: "一段专属录音", emoji: "🎙️" },
+  { name: "一个永远有效的承诺", emoji: "🤙" }, { name: "他的一缕发丝", emoji: "🪮" },
+  { name: "他的钥匙扣", emoji: "🔑" }, { name: "一本写满你的日记", emoji: "📔" },
+  { name: "一片红色的枫叶", emoji: "🍁" }, { name: "一根月老红线", emoji: "🧵" },
+  { name: "他的护身符", emoji: "📿" }, { name: "一个专属树洞", emoji: "🌳" },
+  { name: "陪你的一整天", emoji: "🌞" }, { name: "他珍贵的徽章", emoji: "🎖️" },
+  { name: "一张写满字的便利贴", emoji: "📝" }, { name: "一场专属烟花", emoji: "🎆" },
+  { name: "他的一个背影", emoji: "🚶" }, { name: "一根他的皮筋", emoji: "🎀" }
 ];
 /* 从词库随机拼接，返回 { name, emoji } */
 function generateCustomGift() {
@@ -8264,24 +8281,25 @@ function generateCustomGift() {
 function taSendGift(roleId) {
   const role = roleById(roleId);
   if (!role) return;
-  /* 70% 概率送「TA 自创礼物」（无需礼物库，不扣钱包）；否则从礼物库随机挑 */
-  const useCustom = Math.random() < 0.7;
-  let giftName, emoji, price, isCustom;
+
+  /* 双轨制：随机数 < 0.5 送内置私藏礼物，>= 0.5 送自创专属礼物，各占 50%；
+   * 两条轨道价格恒为 0，TA 送礼不涉及用户钱包扣款 */
+  const useCustom = Math.random() >= 0.5;
+  let giftName, emoji, isCustom;
   if (useCustom) {
     const cg = generateCustomGift();
     giftName = cg.name;
     emoji = cg.emoji;
-    price = 0;          /* 自创礼物：不扣款 */
     isCustom = true;
   } else {
-    if (!state.gifts.length) return;
-    const gift = pickOne(state.gifts);
+    const gift = pickOne(builtInGifts);
     if (!gift) return;
     giftName = gift.name;
     emoji = gift.emoji || '🎁';
-    price = Math.max(0, Math.round((Number(gift.price) || 0) * 100) / 100);
     isCustom = false;
   }
+  const price = 0;   /* 无论内置还是自创，都不扣用户钱包 */
+
   const rec = {
     id: uid(), roleId, roleName: role.name,
     giftName, emoji, price,
@@ -8292,7 +8310,7 @@ function taSendGift(roleId) {
   state.giftHistory.unshift(rec);
   if (state.giftHistory.length > 300) state.giftHistory.length = 300;
   persist();
-  /* TA 送来的礼物显示深色接收卡片（待我收下），卡片样式与普通礼物完全一致 */
+  /* 第一张：礼物卡片（名称 + Emoji），样式与普通礼物完全一致 */
   pushDreamMessage(roleId, {
     sender: 'ta', type: 'gift', giftRecordId: rec.id, giftName,
     emoji, price, note: '', direction: 'in', claimed: false
@@ -8300,23 +8318,21 @@ function taSendGift(roleId) {
   showToast(taName(role.id) + ' 送了你一份礼物');
   if (currentRoute.page === 'sub' && currentRoute.name === 'gifts') renderGiftPage();
 
-  /* 自创礼物：延迟连发两条气泡 —— 前缀句 + 字卡库感谢语 */
-  if (isCustom) {
+  /* 第二条：文本气泡（自创 / 内置各有一套文案） */
+  const secondLine = isCustom
+    ? pickOne(['这是我自己做的，希望你喜欢。', '没花钱，但是心意是真的。'])
+    : pickOne(['路过看到，觉得很适合你。', '知道你喜欢这个，就买啦。']);
+  setTimeout(() => {
+    if (!roleById(roleId)) return;
+    pushDreamMessage(roleId, { sender: 'ta', type: 'text', content: secondLine });
+
+    /* 第三条：约 1 秒后，从主字卡库随机抽一句感谢语 */
     setTimeout(() => {
       if (!roleById(roleId)) return;
-      pushDreamMessage(roleId, { type: 'text', content: pickOne(customGiftPrefixPhrases) });
-      renderChatIf(roleId);
-      refreshMessagesPage();
-      /* 再延迟约 1 秒，从主字卡库抽一句感谢语（受全局拼字卡概率控制） */
-      setTimeout(() => {
-        if (!roleById(roleId)) return;
-        sendTaBurst(roleId, {
-          makeText: prev => composeUniqueReply(roleId, prev),
-          fallback: '谢谢你收下。'
-        });
-      }, 1000);
+      const thanks = composeUniqueReply(roleId, '') || '谢谢你收下。';
+      pushDreamMessage(roleId, { sender: 'ta', type: 'text', content: thanks });
     }, 1000);
-  }
+  }, 400);
 }
 
 /* 我收下 TA 送来的礼物：卡片变浅色，状态更新为已收下 */
@@ -8480,7 +8496,7 @@ function renderSub(name) {
  * 纯前端轻量词频统计，无后端分词：
  * ① 只用超级正则 split 切分（空白 + 全部中英文标点与特殊符号），全程无 while 循环
  * ② 2~6 字的纯中文片段全部计入频次，不做任何数量截断（全量统计）
- * ③ 剔除「的、了、是、在、我、你、他、这、那、就」等停用单字组成的词与显式停用词
+ * ③ 只按显式停用词表过滤；统计后把「好好 / 好好好」这类叠词按完整词合并频次
  * ④ 频次降序排序，仅在最终渲染阶段取前 10 名交给 wordcloud2.js 与排行榜
  * ========================================================= */
 let wcTimeTab = 'week';   /* today 今日 / week 本周 / month 本月，默认本周 */
@@ -8519,29 +8535,30 @@ function wcIsStopWord(w) {
   return WC_STOP_WORDS.has(w);
 }
 
-/* 单字重复归一化：「好好好」→「好好」、「哈哈哈」→「哈哈」，
- * 避免同一个语气词因重复次数不同被拆成多个不同的词分别计数 */
-function wcNormalizeWord(w) {
-  if (w.length >= 2 && /^(.)\1+$/.test(w)) return w.slice(0, 2);
-  return w;
-}
-
 /* 片段清洗：只保留汉字（纯数字、纯字母、emoji、符号会被清成空串，后续自然丢弃） */
 function wcCleanFragment(frag) {
   return String(frag == null ? '' : frag).replace(/[^\u4e00-\u9fa5]/g, '');
 }
 
 /* 消息时间戳归一化为毫秒：
- * 兼容 ts / timestamp / time 三种字段名；数字按「小于 1e11 视为秒」自动换算；
- * 字符串支持 "2026-10-31 15:00" 这类日期文本（老存档/导入数据常见） */
+ * 兼容 ts / timestamp / time 三种字段名，也支持 Date 对象 / 秒级时间戳 / 数字字符串；
+ * 字符串先按 "2026-10-31 15:00" 这类本地格式解析，再兜底解析 ISO（带 T / Z）；
+ * 一律返回数字时间戳用于比对，绝不做字符串比较 */
 function wcMsgTs(m) {
   let raw = m.ts != null ? m.ts : (m.timestamp != null ? m.timestamp : m.time);
+  if (raw instanceof Date) {
+    const t = raw.getTime();
+    return Number.isFinite(t) ? t : 0;
+  }
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw < 1e11 ? raw * 1000 : raw;
   if (typeof raw === 'string' && raw.trim()) {
-    const n = Number(raw);
+    const s = raw.trim();
+    const n = Number(s);
     if (Number.isFinite(n) && n > 0) return n < 1e11 ? n * 1000 : n;
-    const t = new Date(raw.replace(/-/g, '/')).getTime();   /* iOS 不支持 "yyyy-mm-dd hh:mm"，换成斜杠 */
-    if (Number.isFinite(t)) return t;
+    const t1 = new Date(s.replace(/-/g, '/')).getTime();   /* iOS 不支持 "yyyy-mm-dd hh:mm"，换成斜杠 */
+    if (Number.isFinite(t1)) return t1;
+    const t2 = new Date(s).getTime();                      /* 兜底：ISO 带 T / Z 的写法 */
+    if (Number.isFinite(t2)) return t2;
   }
   return 0;
 }
@@ -8570,31 +8587,26 @@ function wcMsgText(m) {
   return '';
 }
 
-/* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容（全量遍历，不做条数限制） */
+/* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容（全量遍历，无任何条数截断） */
 function wcCollectTexts(roleId, timeTab, whoTab) {
   const list = state.chats[roleId] || [];
-  const now = Date.now();
+  const nowDate = new Date();
+  const now = nowDate.getTime();
   let start = 0;
   if (timeTab === 'today') {
     /* 今日：今天 00:00:00 起 */
-    const d = new Date(); d.setHours(0, 0, 0, 0); start = d.getTime();
+    start = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), 0, 0, 0, 0).getTime();
   } else if (timeTab === 'week') {
     /* 本周：本周一 00:00:00 起（getDay() 周日是 0，要回退 6 天而不是 1 天） */
-    const d = new Date();
-    const day = d.getDay();
+    const day = nowDate.getDay();
     const back = day === 0 ? 6 : day - 1;
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() - back);
-    start = d.getTime();
+    start = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - back, 0, 0, 0, 0).getTime();
   } else if (timeTab === 'month') {
-    /* 本月：本月 1 号 00:00:00 起（不再用「最近 30 天」，避免月初数据被漏掉） */
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    d.setDate(1);
-    start = d.getTime();
+    /* 本月：用当前年月，固定从 1 号 00:00:00 开始（绝不用「当前时间减 30 天」） */
+    start = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0).getTime();
   }
   const wantSender = whoTab === 'ta' ? 'ta' : 'user';
-  return list.filter(m => {
+  const texts = list.filter(m => {
     if (!m || m.recalled) return false;
     /* 只统计纯文字消息：图片 / 表情包 / 转账 / 礼物 / 通话 / 卡片一律跳过 */
     const type = m.type || 'text';
@@ -8604,44 +8616,50 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
     const ts = wcMsgTs(m);
     return ts > 0 && ts >= start && ts <= now + 60 * 1000;   /* 允许 1 分钟时钟误差 */
   }).map(m => wcMsgText(m));
+
+  /* 调试日志：方便确认是「没读到数据」还是「被时间/发送者条件过滤掉了」 */
+  console.log('总记录数: ' + list.length);
+  console.log('过滤后参与统计的有效文本数: ' + texts.length);
+  return texts;
 }
 
-/* 找出 word 在词库里已存在的最短真子串（长度 2 起）；长度最多 6，枚举量极小，全程 for 循环无 while */
-function wcShortestSubWord(word, freq) {
-  for (let len = 2; len < word.length; len++) {
-    for (let i = 0; i + len <= word.length; i++) {
-      const sub = word.slice(i, i + len);
-      if (freq[sub] !== undefined) return sub;
-    }
-  }
-  return '';
+/* 叠词折叠键：把连续重复的字压成一个（好好好→好、开开心心→开心），
+ * 只用于识别「同一个词的不同重复写法」，不改变最终保留的词形 */
+function wcRepeatKey(w) {
+  return String(w).replace(/(.)\1+/g, '$1');
 }
 
-/* 同义 / 重叠词归并：把「好好好、想你了」这类长词并入词库里已存在的最短子串（「好好、想你」），
- * 消除同一语义因切分长度不同导致频次被拆散；先算好合并目标，再统一应用，避免边遍历边改表 */
-function wcMergeSubWords(freq) {
-  const words = Object.keys(freq);
-  const targets = Object.create(null);
-  words.forEach(w => {
-    let cur = w;
-    /* 最多上溯 5 层（词长上限 6，子串必定更短，不会成环） */
-    for (let step = 0; step < 5; step++) {
-      const next = wcShortestSubWord(cur, freq);
-      if (!next || next === cur) break;
-      cur = next;
-    }
-    if (cur !== w) targets[w] = cur;
+/* 强制合并重复词：折叠键相同的多个写法（好好 / 好好好）以「最长的完整词」为准，
+ * 把所有频次累加到它、删除其它写法；只合并叠词变体，
+ * 不会把「讨厌 / 讨厌你」这类语义不同的词强行合并 */
+function wcMergeRepeatWords(freq) {
+  const groups = Object.create(null);
+  Object.keys(freq).forEach(w => {
+    const key = wcRepeatKey(w);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(w);
   });
-  Object.keys(targets).forEach(w => {
-    freq[targets[w]] = (freq[targets[w]] || 0) + freq[w];
-    delete freq[w];
+  Object.keys(groups).forEach(key => {
+    const variants = groups[key];
+    if (variants.length < 2) return;
+    /* 保留最长的写法；长度相同则保留频次更高者，保证「完整的词」留存 */
+    let keep = variants[0];
+    variants.forEach(w => {
+      if (w.length > keep.length || (w.length === keep.length && freq[w] > freq[keep])) keep = w;
+    });
+    let total = 0;
+    variants.forEach(w => {
+      total += freq[w];
+      if (w !== keep) delete freq[w];
+    });
+    freq[keep] = total;
   });
 }
 
 /* 最简词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15], ...] 格式
  * 全程只有 split + forEach，没有任何 while 循环，结构上不可能死循环
- * 规则：超级正则切分 → 只保留汉字 → 2~6 字且非停用词的片段全部计数（不截断）
- * 统计后先做「重复字归一化 + 子串归并」，再做降序排序；截取前 10 名留给渲染阶段 */
+ * 规则：超级正则切分 → 只保留汉字 → 2~6 字片段整段保留（不再二次拆分）→ 停用词过滤
+ * 统计后做「重复词合并」，再做降序排序；截取前 10 名留给渲染阶段 */
 function wcBuildList(texts) {
   const freq = Object.create(null);
   let budget = WC_MAX_TOTAL_CHARS;   /* 100 万字预算，仅作极端保护，正常聊天不会被截断 */
@@ -8654,15 +8672,15 @@ function wcBuildList(texts) {
     budget -= raw.length;
     /* 空格、换行、制表符、全部中英文标点与特殊符号一律作为分割线 */
     raw.split(WC_SPLIT_RE).forEach(piece => {
-      const clean = wcNormalizeWord(wcCleanFragment(piece));   /* 纯数字/字母/emoji/符号 → 空串 */
-      if (clean.length < 2 || clean.length > 6) return;        /* 只保留 2~6 字自然短语 */
+      const clean = wcCleanFragment(piece);                    /* 纯数字/字母/emoji/符号 → 空串 */
+      if (clean.length < 2 || clean.length > 6) return;        /* 2~6 字整段保留，绝不拆成两半 */
       if (wcIsStopWord(clean)) return;                         /* 只按停用词表过滤 */
       freq[clean] = (freq[clean] || 0) + 1;                    /* 所有合格词全量累加，不设词数上限 */
     });
   });
 
-  /* 归并「好好 / 好好好」「想你 / 想你了」这类同义拆分，让频次集中 */
-  wcMergeSubWords(freq);
+  /* 强制合并「好好 / 好好好」这类重复写法，以完整词为准累加频次 */
+  wcMergeRepeatWords(freq);
 
   /* 转为数组后按频次降序排序（同频时长词优先），此处不截断 */
   return Object.keys(freq)
@@ -10872,12 +10890,60 @@ function renderLetterNewPage() {
 let quizDraft = null;
 let quizTargetRole = null;
 
+/* 题目「作答模式」归一化（保存 / 读取历史模板时统一走这里）：
+ * 新结构：selectMode('fixed'|'random') + fixedCount + randomMin + randomMax；
+ * 兼容旧数据：pick / selectCount / maxSelect 一律转为固定选择数量 */
+function quizQuestionNormalize(q) {
+  const src = q || {};
+  const options = (Array.isArray(src.options) ? src.options : []).map(o => String(o)).filter(Boolean);
+  const maxN = Math.max(1, options.length);
+  const legacy = Number(
+    src.selectCount != null ? src.selectCount
+      : (src.maxSelect != null ? src.maxSelect : src.pick)
+  ) || 1;
+  const selectMode = src.selectMode === 'random' ? 'random' : 'fixed';
+  const fixedCount = clamp(Math.round(Number(src.fixedCount != null ? src.fixedCount : legacy)) || 1, 1, maxN);
+  let randomMin = clamp(Math.round(Number(src.randomMin)) || 1, 1, maxN);
+  let randomMax = clamp(Math.round(Number(src.randomMax)) || Math.min(3, maxN), 1, maxN);
+  if (randomMax < randomMin) randomMax = randomMin;
+  return {
+    text: String(src.text || src.question || ''),
+    options,
+    selectMode,
+    fixedCount,
+    randomMin,
+    randomMax
+  };
+}
+
+/* 编辑器草稿版：保留空选项输入框（归一化会过滤空串，不能直接用） */
+function quizQuestionInit(q) {
+  const src = q || {};
+  const options = Array.isArray(src.options) && src.options.length ? src.options.slice() : ['', ''];
+  const maxN = Math.max(1, options.length);
+  const legacy = Number(
+    src.selectCount != null ? src.selectCount
+      : (src.maxSelect != null ? src.maxSelect : src.pick)
+  ) || 1;
+  let randomMin = clamp(Math.round(Number(src.randomMin)) || 1, 1, maxN);
+  let randomMax = clamp(Math.round(Number(src.randomMax)) || Math.min(3, maxN), 1, maxN);
+  if (randomMax < randomMin) randomMax = randomMin;
+  return {
+    text: String(src.text || ''),
+    options,
+    selectMode: src.selectMode === 'random' ? 'random' : 'fixed',
+    fixedCount: clamp(Math.round(Number(src.fixedCount != null ? src.fixedCount : legacy)) || 1, 1, maxN),
+    randomMin,
+    randomMax
+  };
+}
+
 function renderQuizzesPage() {
   const list = state.quizTemplates.slice().sort((a, b) => b.ts - a.ts);
   subShell('问卷模板', `
     <div class="top-stat"><span>共 <b>${list.length}</b> 个模板</span></div>
     <div class="panel row-between">
-      <div class="muted">模板可重复发送，${esc(taName())}会逐题随机选择选项。</div>
+      <div class="muted">模板可重复发送，${esc(taName())}会按每题设定的作答模式勾选选项。</div>
       <button class="btn primary" id="quizNew">＋ 新建问卷</button>
     </div>
     ${list.length ? list.map(t => `
@@ -10932,7 +10998,7 @@ function sendTemplateDialog(tpl) {
           ${state.roles.map(r => `<option value="${r.id}"${r.id === state.activeRoleId ? ' selected' : ''}>${esc(r.name)}</option>`).join('')}
         </select>
       </div>
-      <p class="muted">发送后${esc(taName())}会对每个问题随机选择一个选项，并逐条回复。</p>`,
+      <p class="muted">发送后${esc(taName())}会按每题的作答模式（固定选择 / 随机范围）勾选选项，并逐题回复。</p>`,
     actions: [
       { label: '取消' },
       {
@@ -10950,7 +11016,7 @@ function renderQuizNewPage() {
   quizTargetRole = pendingQuizRoleId || state.activeRoleId || (state.roles[0] && state.roles[0].id);
   const fromChat = !!pendingQuizRoleId;
   pendingQuizRoleId = null;
-  quizDraft = { title: '', questions: [{ text: '', options: ['', ''] }] };
+  quizDraft = { title: '', questions: [quizQuestionInit({ text: '', options: ['', ''] })] };
 
   subShell('新建问卷', '<div id="quizEditor"></div>',
     /* 标题栏右侧：从问卷编辑器里一键进入模板库 —— 桌面图标已迁移到此入口 */
@@ -10998,11 +11064,7 @@ function openQuizTemplatePicker() {
         if (!tpl) return;
         quizDraft = JSON.parse(JSON.stringify({
           title: tpl.title,
-          questions: tpl.questions.map(q => ({
-            text: q.text,
-            options: q.options.slice(),
-            pick: Number(q.pick) || 1
-          }))
+          questions: tpl.questions.map(q => quizQuestionInit(q))
         }));
         root.remove();
         renderQuizEditorInner();
@@ -11054,10 +11116,23 @@ function renderQuizEditorInner() {
           <button class="btn-sm" data-opt-add="${qi}">＋ 选项</button>
           ${quizDraft.questions.length > 1 ? `<button class="btn-sm" data-qdel="${qi}" style="color:#ff5a5f">删除问题</button>` : ''}
         </div>
-        <div style="display:flex;align-items:center;gap:6px;margin-top:7px">
-          <span class="muted" style="font-size:12px">可选数量</span>
-          <input class="input" type="number" min="1" max="${Math.max(1, q.options.length)}" value="${clamp(Math.round(Number(q.pick) || 1), 1, Math.max(1, q.options.length))}" data-qpick="${qi}" style="width:76px;padding:6px 8px;text-align:center">
-          <span class="muted" style="font-size:12px">1 = 单选，大于 1 = 多选（${esc(taName())}会随机勾选该数量的选项）</span>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:8px">
+          <span class="muted" style="font-size:12px;flex:none">作答模式：</span>
+          <div class="qz-mode-tabs">
+            <button class="qz-mode-tab${q.selectMode === 'random' ? '' : ' active'}" type="button" data-qmode="fixed" data-qi-mode="${qi}">固定选择</button>
+            <button class="qz-mode-tab${q.selectMode === 'random' ? ' active' : ''}" type="button" data-qmode="random" data-qi-mode="${qi}">随机范围</button>
+          </div>
+        </div>
+        <div class="qz-count-row">
+          ${q.selectMode === 'random' ? `
+            <span class="qz-count-text">在</span>
+            <input class="input qz-num" type="number" inputmode="numeric" min="1" max="${Math.max(1, q.options.length)}" value="${clamp(Math.round(Number(q.randomMin) || 1), 1, Math.max(1, q.options.length))}" data-qrand-min="${qi}">
+            <span class="qz-count-text">到</span>
+            <input class="input qz-num" type="number" inputmode="numeric" min="1" max="${Math.max(1, q.options.length)}" value="${clamp(Math.round(Number(q.randomMax) || Math.min(3, Math.max(1, q.options.length))), 1, Math.max(1, q.options.length))}" data-qrand-max="${qi}">
+            <span class="qz-count-text">个之间随机</span>` : `
+            <span class="qz-count-text">选</span>
+            <input class="input qz-num" type="number" inputmode="numeric" min="1" max="${Math.max(1, q.options.length)}" value="${clamp(Math.round(Number(q.fixedCount) || 1), 1, Math.max(1, q.options.length))}" data-qfixed="${qi}">
+            <span class="qz-count-text">个选项</span>`}
         </div>
       </div>`).join('')}
     <button class="btn block" id="quizAddQ">＋ 添加问题</button>
@@ -11072,9 +11147,15 @@ function onQuizInput(e) {
   if (!quizDraft) return;
   if (t.id === 'quizTitle') quizDraft.title = t.value;
   else if (t.hasAttribute('data-qtext')) quizDraft.questions[Number(t.dataset.qtext)].text = t.value;
-  else if (t.hasAttribute('data-qpick')) {
-    const q = quizDraft.questions[Number(t.dataset.qpick)];
-    if (q) q.pick = Math.max(1, parseInt(t.value, 10) || 1);
+  else if (t.hasAttribute('data-qfixed')) {
+    const q = quizDraft.questions[Number(t.dataset.qfixed)];
+    if (q) q.fixedCount = Math.max(1, parseInt(t.value, 10) || 1);
+  } else if (t.hasAttribute('data-qrand-min')) {
+    const q = quizDraft.questions[Number(t.dataset.qrandMin)];
+    if (q) q.randomMin = Math.max(1, parseInt(t.value, 10) || 1);
+  } else if (t.hasAttribute('data-qrand-max')) {
+    const q = quizDraft.questions[Number(t.dataset.qrandMax)];
+    if (q) q.randomMax = Math.max(1, parseInt(t.value, 10) || 1);
   }
   else if (t.hasAttribute('data-oi')) {
     quizDraft.questions[Number(t.dataset.qi)].options[Number(t.dataset.oi)] = t.value;
@@ -11090,12 +11171,24 @@ function onQuizClick(e) {
   if (!btn || !quizDraft) return;
 
   if (btn.id === 'quizAddQ') {
-    quizDraft.questions.push({ text: '', options: ['', ''] });
+    quizDraft.questions.push(quizQuestionInit({ text: '', options: ['', ''] }));
+    renderQuizEditorInner();
+    return;
+  }
+  if (btn.hasAttribute('data-qmode')) {
+    const qi = Number(btn.dataset.qiMode);
+    const q = quizDraft.questions[qi];
+    if (!q) return;
+    q.selectMode = btn.dataset.qmode === 'random' ? 'random' : 'fixed';
+    /* 切换模式时把数量字段夹到当前选项数范围内，再重绘出对应的输入框 */
+    quizDraft.questions[qi] = quizQuestionInit(q);
     renderQuizEditorInner();
     return;
   }
   if (btn.hasAttribute('data-opt-add')) {
-    quizDraft.questions[Number(btn.dataset.optAdd)].options.push('');
+    const qi = Number(btn.dataset.optAdd);
+    quizDraft.questions[qi].options.push('');
+    quizDraft.questions[qi] = quizQuestionInit(quizDraft.questions[qi]);
     renderQuizEditorInner();
     return;
   }
@@ -11104,6 +11197,7 @@ function onQuizClick(e) {
     const oi = Number(btn.dataset.oiDel);
     const opts = quizDraft.questions[qi].options;
     if (opts.length > 1) opts.splice(oi, 1);
+    quizDraft.questions[qi] = quizQuestionInit(quizDraft.questions[qi]);
     renderQuizEditorInner();
     return;
   }
@@ -11136,10 +11230,19 @@ function collectQuiz() {
   const questions = quizDraft.questions
     .map(q => {
       const options = q.options.map(o => o.trim()).filter(Boolean);
+      const maxN = Math.max(1, options.length);
+      const selectMode = q.selectMode === 'random' ? 'random' : 'fixed';
+      const fixedCount = clamp(Math.round(Number(q.fixedCount) || 1), 1, maxN);
+      let randomMin = clamp(Math.round(Number(q.randomMin) || 1), 1, maxN);
+      let randomMax = clamp(Math.round(Number(q.randomMax) || Math.min(3, maxN)), 1, maxN);
+      if (randomMax < randomMin) randomMax = randomMin;
       return {
         text: q.text.trim(),
         options,
-        pick: clamp(Math.round(Number(q.pick) || 1), 1, Math.max(1, options.length))
+        selectMode,
+        fixedCount,
+        randomMin,
+        randomMax
       };
     })
     .filter(q => q.text && q.options.length);
