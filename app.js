@@ -8524,11 +8524,14 @@ const WC_STOP_WORDS = new Set([
   .forEach(w => WC_STOP_WORDS.add(w));
 
 /* 显示上限：统计阶段一律全量累加，只有传给 WordCloud 与排行榜时才截取前 10 名；
- * 单条消息最多统计 5000 字（防单条超长文本）；总字符预算放大到 100 万字，
- * 正常聊天记录（哪怕几万条）都不会被截断，彻底解决「频次偏低」问题 */
+ * 不设置任何「总字符 / 总消息条数 / 单条字数」预算，当前梦角的聊天记录会全部遍历 */
 const WC_TOP_N = 10;
-const WC_MAX_TEXT_LEN = 5000;
-const WC_MAX_TOTAL_CHARS = 1000000;
+
+/* 原生中文分词器（现代浏览器均支持）：用于把超过 6 字的长句拆成有意义的词。
+ * 不可用时自动退化为 3 字一组切块，保证不会整句被丢弃 */
+const WC_SEGMENTER = (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function')
+  ? new Intl.Segmenter('zh', { granularity: 'word' })
+  : null;
 
 /* 停用词判断：只按专门的停用词表过滤 */
 function wcIsStopWord(w) {
@@ -8538,6 +8541,41 @@ function wcIsStopWord(w) {
 /* 片段清洗：只保留汉字（纯数字、纯字母、emoji、符号会被清成空串，后续自然丢弃） */
 function wcCleanFragment(frag) {
   return String(frag == null ? '' : frag).replace(/[^\u4e00-\u9fa5]/g, '');
+}
+
+/* 超长片段兜底切块：按 3 字一组切开，末尾不足 2 字的丢弃；
+ * 纯 for 循环、不递归，保证长句也有词可统计 */
+function wcChunkLong(clean, out) {
+  const res = out || [];
+  for (let i = 0; i < clean.length; i += 3) {
+    const piece = clean.slice(i, i + 3);
+    if (piece.length >= 2 && !wcIsStopWord(piece)) res.push(piece);
+  }
+  return res;
+}
+
+/* 把一个切分片段转成有效词数组：
+ * ≤6 字整段保留（「讨厌你」不会被拆开）；
+ * >6 字先用 Intl.Segmenter 做中文分词，失败时退化为 3 字切块；
+ * 这样聊天里没有标点的长句不会再被整段吞掉 */
+function wcSplitFragment(piece) {
+  const clean = wcCleanFragment(piece);
+  if (clean.length < 2) return [];
+  if (clean.length <= 6) return [clean];
+  const out = [];
+  if (WC_SEGMENTER) {
+    for (const seg of WC_SEGMENTER.segment(clean)) {
+      if (!seg.isWordLike) continue;
+      const w = wcCleanFragment(seg.segment);
+      if (w.length > 6) {
+        wcChunkLong(w, out);
+      } else if (w.length >= 2 && !wcIsStopWord(w)) {
+        out.push(w);
+      }
+    }
+  }
+  if (out.length) return out;
+  return wcChunkLong(clean);
 }
 
 /* 消息时间戳归一化为毫秒：
@@ -8567,32 +8605,65 @@ function wcMsgTs(m) {
  * 聊天里真正落库的是 role:'user' / 'dream'，sender 只有转账、礼物等类型才带，
  * 所以我发的消息必须能用 role:'user'、isUser:true、sender:'user' 任意一种匹配到 */
 function wcMsgSender(m) {
-  if (m.sender === 'ta') return 'ta';
-  if (m.sender === 'user' || m.sender === 'me') return 'user';
+  if (!m) return '';
   if (m.isUser === true || m.mine === true) return 'user';
-  if (m.who === 'me') return 'user';
-  if (m.who === 'ta') return 'ta';
+  if (m.isUser === false) return 'ta';
+  if (m.sender === 'ta' || m.sender === 'dream' || m.sender === 'assistant') return 'ta';
+  if (m.sender === 'user' || m.sender === 'me') return 'user';
+  if (m.who === 'me' || m.who === 'user') return 'user';
+  if (m.who === 'ta' || m.who === 'dream') return 'ta';
   if (m.role === 'user' || m.role === 'me') return 'user';
+  if (m.role === 'dream' || m.role === 'ta' || m.role === 'assistant') return 'ta';
   if (m.role === 'system') return '';        /* 系统提示不参与统计 */
   return 'ta';
 }
 
-/* 取消息正文：TA 的消息可能落在 text 字段，我发的可能落在 content 字段，两者都兼容；
+/* 取消息正文：兼容 text / content / msg / message / body，字符串或 {text} 对象；
+ * 逐个候选字段取第一个「非空」的文本，避免某个字段存了空串就把整条消息判成无正文；
  * 图片 / 表情包等非文字内容（没有文本字段）返回空串，后续直接被跳过 */
 function wcMsgText(m) {
-  const raw = m.text != null ? m.text : (m.content != null ? m.content : m.msg);
-  if (raw == null) return '';
-  if (typeof raw === 'string') return raw.trim();
-  if (typeof raw === 'object' && typeof raw.text === 'string') return raw.text.trim();
+  if (!m) return '';
+  const candidates = [m.text, m.content, m.msg, m.message, m.body];
+  for (const raw of candidates) {
+    if (raw == null) continue;
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+    if (typeof raw === 'object' && typeof raw.text === 'string' && raw.text.trim()) return raw.text.trim();
+  }
   return '';
 }
 
-/* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容（全量遍历，无任何条数截断） */
+/* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容
+ * 关键：全量遍历，没有 slice(-xx) / splice / 条数上限 / 字符预算，一条都不会少
+ * 同时输出【词云排查】日志：先看总条数，再逐项看被哪种条件过滤掉 */
 function wcCollectTexts(roleId, timeTab, whoTab) {
-  const list = state.chats[roleId] || [];
+  /* ① 定位梦角：roleId 取不到时退回当前会话角色，避免读到 undefined 直接变成 0 条 */
+  let rid = roleId;
+  if (!rid || !state.chats || !Array.isArray(state.chats[rid])) rid = state.activeRoleId;
+  const allMessages = (state.chats && Array.isArray(state.chats[rid])) ? state.chats[rid] : [];
+
+  /* ② 用户要求的排查日志：先确认「到底读到了多少条、时间跨度是多少」 */
+  console.log("【词云排查】当前梦角总消息数:", allMessages.length);
+  console.log("【词云排查】第一条消息时间:", allMessages[0] && allMessages[0].time, "最后一条:", allMessages[allMessages.length - 1] && allMessages[allMessages.length - 1].time);
+  /* 补一条原始时间字段日志：部分旧记录用的是 ts，方便看清真实存储的时间格式 */
+  const rawTime = m => {
+    if (!m) return undefined;
+    if (m.time !== undefined) return m.time;
+    if (m.ts !== undefined) return m.ts;
+    return m.timestamp;
+  };
+  console.log("【词云排查】原始时间字段（首/尾）:", rawTime(allMessages[0]), '/', rawTime(allMessages[allMessages.length - 1]));
+  /* 一条都没读到时，把所有梦角的条数打出来，判断是不是梦角 id 取错了 */
+  if (!allMessages.length) {
+    const perRole = Object.keys(state.chats || {}).map(id => {
+      const r = roleById(id);
+      return (r ? r.name : id) + ':' + ((state.chats[id] || []).length);
+    });
+    console.log("【词云排查】当前梦角 ID:", rid, "各梦角消息条数 →", perRole.join(' / ') || '（无任何聊天记录）');
+  }
+
+  /* ③ 时间起点：今日/本周用本地 0 点整计算；全部模式不做任何时间比对 */
   const nowDate = new Date();
   const now = nowDate.getTime();
-  /* 全部：不做任何时间戳比对，所有历史聊天都纳入统计 */
   const isAll = timeTab === 'all';
   let start = 0;
   if (timeTab === 'today') {
@@ -8604,22 +8675,45 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
     const back = day === 0 ? 6 : day - 1;
     start = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - back, 0, 0, 0, 0).getTime();
   }
-  const wantSender = whoTab === 'ta' ? 'ta' : 'user';
-  const texts = list.filter(m => {
-    if (!m || m.recalled) return false;
-    /* 只统计纯文字消息：图片 / 表情包 / 转账 / 礼物 / 通话 / 卡片一律跳过 */
-    const type = m.type || 'text';
-    if (type !== 'text') return false;
-    if (wcMsgSender(m) !== wantSender) return false;
-    if (!wcMsgText(m)) return false;
-    if (isAll) return true;   /* 全部：跳过时间戳比对，缺失 ts 的旧记录也能统计 */
-    const ts = wcMsgTs(m);
-    return ts > 0 && ts >= start && ts <= now + 60 * 1000;   /* 允许 1 分钟时钟误差 */
-  }).map(m => wcMsgText(m));
+  console.log("【词云排查】时间范围:", isAll ? '全部（跳过时间过滤）' : new Date(start).toLocaleString('zh-CN'));
 
-  /* 调试日志：方便确认是「没读到数据」还是「被时间/发送者条件过滤掉了」 */
-  console.log('总记录数: ' + list.length);
-  console.log('过滤后参与统计的有效文本数: ' + texts.length);
+  const wantSender = whoTab === 'ta' ? 'ta' : 'user';
+
+  /* ④ 先统计整体分布（类型 / 发送方），再逐条过滤并计数，过滤原因一目了然 */
+  const typeMap = Object.create(null);
+  const senderMap = Object.create(null);
+  allMessages.forEach(m => {
+    if (!m) return;
+    const t = m.type || 'text';
+    typeMap[t] = (typeMap[t] || 0) + 1;
+    const s = wcMsgSender(m) || 'other';
+    senderMap[s] = (senderMap[s] || 0) + 1;
+  });
+  console.log("【词云排查】消息类型分布:", typeMap);
+  console.log("【词云排查】发送方分布:", senderMap);
+
+  const stats = { recalled: 0, nonText: 0, sender: 0, emptyText: 0, badTime: 0, ok: 0 };
+  const texts = [];
+
+  allMessages.forEach(m => {
+    if (!m) return;
+    if (m.recalled) { stats.recalled++; return; }                 /* 已撤回的不统计 */
+    const type = m.type || 'text';
+    if (type !== 'text') { stats.nonText++; return; }              /* 图片/表情/转账/礼物/通话等非纯文字 */
+    if (wcMsgSender(m) !== wantSender) { stats.sender++; return; } /* 发送方不匹配 */
+    const text = wcMsgText(m);
+    if (!text) { stats.emptyText++; return; }                      /* 没有文本正文 */
+    if (!isAll) {
+      const ts = wcMsgTs(m);
+      /* 时间统一转成毫秒数字后再比较；允许 1 分钟时钟误差 */
+      if (!(ts > 0) || ts < start || ts > now + 60 * 1000) { stats.badTime++; return; }
+    }
+    stats.ok++;
+    texts.push(text);                                              /* 全量收集，不截断条数 */
+  });
+
+  console.log("【词云排查】过滤明细:", stats);
+  console.log("【词云排查】过滤后参与统计的有效文本数:", texts.length);
   return texts;
 }
 
@@ -8656,26 +8750,22 @@ function wcMergeRepeatWords(freq) {
   });
 }
 
-/* 最简词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15], ...] 格式
+/* 词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15], ...] 格式
  * 全程只有 split + forEach，没有任何 while 循环，结构上不可能死循环
- * 规则：超级正则切分 → 只保留汉字 → 2~6 字片段整段保留（不再二次拆分）→ 停用词过滤
- * 统计后做「重复词合并」，再做降序排序；截取前 10 名留给渲染阶段 */
+ * 规则：超级正则切分 → 2~6 字片段整段保留；超过 6 字的长句交给 wcSplitFragment
+ * （优先原生分词、兜底 3 字切块）→ 停用词过滤；
+ * 不设任何总字符预算，所有消息文本都参与统计；截取前 10 名留给渲染阶段 */
 function wcBuildList(texts) {
   const freq = Object.create(null);
-  let budget = WC_MAX_TOTAL_CHARS;   /* 100 万字预算，仅作极端保护，正常聊天不会被截断 */
 
   texts.forEach(t => {
-    if (budget <= 0) return;
     let raw = String(t || '');
-    /* 单条消息硬截断：防止一条几万字的文本把内存撑爆 */
-    if (raw.length > WC_MAX_TEXT_LEN) raw = raw.slice(0, WC_MAX_TEXT_LEN);
-    budget -= raw.length;
     /* 空格、换行、制表符、全部中英文标点与特殊符号一律作为分割线 */
     raw.split(WC_SPLIT_RE).forEach(piece => {
-      const clean = wcCleanFragment(piece);                    /* 纯数字/字母/emoji/符号 → 空串 */
-      if (clean.length < 2 || clean.length > 6) return;        /* 2~6 字整段保留，绝不拆成两半 */
-      if (wcIsStopWord(clean)) return;                         /* 只按停用词表过滤 */
-      freq[clean] = (freq[clean] || 0) + 1;                    /* 所有合格词全量累加，不设词数上限 */
+      wcSplitFragment(piece).forEach(clean => {
+        if (wcIsStopWord(clean)) return;                       /* 只按停用词表过滤 */
+        freq[clean] = (freq[clean] || 0) + 1;                  /* 全量累加，不设词数上限 */
+      });
     });
   });
 
@@ -8796,6 +8886,8 @@ function drawWordCloud() {
   /* ② 取数 + 全量词频统计 → 严格清洗成 [['词语', 频次], ...] 完整列表（此阶段不截断） */
   const texts = wcCollectTexts(wcRoleId || state.activeRoleId, wcTimeTab, wcWhoTab);
   const fullList = wcSanitizeList(wcBuildList(texts));
+  /* 排查日志：确认统计阶段产出了多少词条，再对比最终只渲染 Top 10 */
+  console.log("【词云排查】分词后词条总数:", fullList.length, "｜渲染数量:", Math.min(fullList.length, WC_TOP_N));
   if (!fullList.length) {
     const scope = wcTimeTab === 'all' ? '全部聊天记录' : '这段时间';
     showEmpty(texts.length
