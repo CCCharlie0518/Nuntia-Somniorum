@@ -8488,97 +8488,36 @@ let wcWhoTab = 'ta';      /* ta TA说的 / me 我说的，默认 TA 说的 */
 let wcRoleId = null;      /* 进入词云页时锁定的梦角 id，切换筛选时保持不变 */
 let wcRenderSeq = 0;      /* 渲染序号：快速切换筛选时，旧的延迟渲染任务自动作废，避免重复叠画卡死 */
 
-/* ===== 超级分割正则：一切空白 + 中英文标点 + 常见特殊符号，全部作为最高优先级分割线 =====
- * 覆盖：半角/全角空格、换行 \n \r、制表符 \t、垂直制表符 \v、换页符 \f、不换行空格 \u00A0、全角空格 \u3000、
- * 中英文逗号句号问号感叹号顿号分号冒号、中英文引号、圆括号方括号、中文书名号/直角引号、波浪号、破折号、
- * 下划线、加号、星号、等号、与号、井号、at 符、￥$%^、省略号 …… 等 */
-const WC_SPLIT_RE = /[ \n\r\t\v\f\u00A0\u3000，。！？、,.!?;；:："'“”‘’（）()\[\]【】《》〈〉「」『』<>~～\-—_+*=&#@￥$%^…|\/\\]+/;
+/* ===== 词云分词（最简方案）：全程只用 split + forEach，没有任何 while 循环，结构上不可能死循环 ===== */
+/* 分割线：空白 + 全部中英文标点 + 常见特殊符号，作为最高优先级的切分依据 */
+const WC_SPLIT_RE = /[\s，。！？、,.!?;；:："'“”‘’（）()\[\]【】《》<>~～\-—_+*=&#@￥$%^…]+/;
 
-/* 防卡死硬限制：单条消息最大处理字符数 / 单个片段最大扫描长度 / 全部文本总字符预算 */
+/* 停用词：无意义单字 / 虚词 / 语气词，命中即整段丢弃 */
+const WC_STOP_WORDS = new Set([
+  '的', '了', '吗', '呢', '啊', '在', '是', '我', '你', '他', '她', '它',
+  '这', '那', '就', '不', '也', '都', '还', '和', '跟', '与', '或', '但', '而',
+  '呀', '吧', '嘛', '么', '哦', '嗯', '很', '太', '最', '更', '之', '着', '过',
+  '们', '个', '于', '把', '被', '让', '给', '对', '向', '从', '又', '再', '只',
+  '已', '为', '且', '即', '却', '若', '虽', '及', '并', '所', '如', '同', '比',
+  '等', '每', '各', '别', '另', '您', '咱', '啥'
+]);
+/* 只由这些单字组成的词（如「我你」）同样无意义，整段丢弃 */
+const WC_STOP_CHARS = new Set(Array.from(WC_STOP_WORDS));
+
+/* 词数上限 40（绝不能多传）；单条消息 5000 字、全部文本 20000 字，超长一律截断 */
+const WC_MAX_WORDS = 40;
 const WC_MAX_TEXT_LEN = 5000;
-const WC_MAX_FRAG_LEN = 400;
 const WC_MAX_TOTAL_CHARS = 20000;
 
-/* 停用单字（虚词/语气词/高频代词）：既作为切分点，也用于剔除全由虚词组成的词 */
-const WC_HARD_CHARS = '的了是在这那就也都还和跟与或但而啊呀吧呢嘛么哦嗯吗嘛呢啥不没很太最更之着过们个于把被让给对向从又再先只已为且即却若虽及并所如同比等每各别另您咱';
-const WC_HARD_RE = new RegExp('[' + WC_HARD_CHARS + ']+');
-/* 软停用单字（人称代词）：可以成词（想你/陪我），但全由代词组成的词（如"我你"）无意义 */
-const WC_STOP_SOFT = new Set('我你他她它'.split(''));
-/* 高频无意义双字/多字词，直接整体过滤 */
-const WC_STOP_PHRASES = new Set([
-  '什么', '怎么', '怎样', '为什么', '这个', '那个', '就是', '不是', '没有', '没什么',
-  '还是', '还有', '一个', '一些', '可以', '可能', '应该', '因为', '所以', '但是',
-  '然后', '现在', '知道', '觉得', '这样', '那样', '真的', '时候', '东西', '事情',
-  '一下', '一点', '有点', '不会', '不能', '不要', '不用', '没事', '这么', '那么', '已经',
-  '我们', '你们', '他们', '她们', '咱们', '自己', '大家', '这个', '那个', '一个'
-]);
-
-/* 判断候选词是否为停用词（显式命中，或全部由人称代词组成） */
+/* 停用词判断：显式命中停用词，或整词全部由虚词 / 代词组成 */
 function wcIsStopWord(w) {
-  if (WC_STOP_PHRASES.has(w)) return true;
-  for (const ch of w) if (!WC_STOP_SOFT.has(ch)) return false;
-  return true;
+  if (WC_STOP_WORDS.has(w)) return true;
+  return Array.from(w).every(ch => WC_STOP_CHARS.has(ch));
 }
 
-/* 片段清洗：超级分割后，剔除数字、字母、emoji、残留符号，只保留汉字；
- * 结果为空说明是纯数字/纯符号/纯表情，直接丢弃 */
+/* 片段清洗：只保留汉字（纯数字、纯字母、emoji、符号会被清成空串，后续自然丢弃） */
 function wcCleanFragment(frag) {
-  return String(frag == null ? '' : frag).replace(/[^\u4e00-\u9fa5]/g, '').trim();
-}
-
-/* 从字卡库提取 2~6 字的常用短语词典，用于长句（>6 字）的核心词匹配 */
-function wcBuildDict() {
-  const dict = new Set();
-  const collect = content => {
-    /* 超长字卡同样截断，避免建词典阶段就消耗过多内存与时间 */
-    String(content || '').slice(0, WC_MAX_TEXT_LEN).split(WC_SPLIT_RE).forEach(piece => {
-      const clean = wcCleanFragment(piece);
-      if (!clean) return;
-      if (clean.length <= 6) {
-        if (clean.length >= 2 && !wcIsStopWord(clean)) dict.add(clean);
-        return;
-      }
-      /* 字卡里的长句同样按停用字切分，只留 2~6 字的核心短语 */
-      clean.split(WC_HARD_RE).forEach(part => {
-        if (part.length >= 2 && part.length <= 6 && !wcIsStopWord(part)) dict.add(part);
-      });
-    });
-  };
-  (state.cards || []).forEach(c => { if (c && c.enabled !== false) collect(c.content); });
-  (state.userPatCards || []).forEach(c => { if (c && c.enabled !== false) collect(c.content); });
-  (state.taPatCards || []).forEach(c => { if (c && c.enabled !== false) collect(c.content); });
-  return dict;
-}
-
-/* 长句核心词匹配：在片段内做「最长匹配」扫描，命中词卡库短语就计一次；
- * 返回 true 表示至少命中一个，避免再做滑窗噪声 */
-function wcExtractLong(frag, dict, add) {
-  let i = 0, hits = 0, guard = 0;
-  const MAX_STEP = 4000;   /* 硬上限：哪怕出现异常数据也不会无限打转 */
-  while (i < frag.length && guard < MAX_STEP) {
-    guard++;
-    let hit = '';
-    for (let len = Math.min(6, frag.length - i); len >= 2; len--) {
-      const cand = frag.slice(i, i + len);
-      if (dict.has(cand)) { hit = cand; break; }
-    }
-    /* 命中就跳过整个词（至少 2 字），未命中必须强制前进 1 位，绝不原地踏步 */
-    if (hit) { add(hit); hits++; i += hit.length; }
-    else i += 1;
-  }
-  return hits > 0;
-}
-
-/* 长句兜底：字卡库匹配不到时，按停用字切分，再用 2~4 字滑窗提取核心词 */
-function wcFallbackLong(frag, add) {
-  frag.split(WC_HARD_RE).forEach(part => {
-    if (part.length < 2) return;
-    if (part.length <= 6) { add(part); return; }
-    /* 超长部分先截断，滑窗只处理前 400 字，避免生成海量候选把内存撑爆 */
-    const p = part.length > WC_MAX_FRAG_LEN ? part.slice(0, WC_MAX_FRAG_LEN) : part;
-    for (let size = 2; size <= 4; size++)
-      for (let i = 0; i + size <= p.length; i++) add(p.slice(i, i + size));
-  });
+  return String(frag == null ? '' : frag).replace(/[^\u4e00-\u9fa5]/g, '');
 }
 
 /* 消息时间戳归一化为毫秒：
@@ -8596,14 +8535,28 @@ function wcMsgTs(m) {
   return 0;
 }
 
-/* 消息发送方归一化：聊天里真正落库的是 role:'user' / 'dream'，
- * sender 字段只有部分类型（转账、礼物）才带，所以必须按 role 兜底，否则会一条都匹配不到 */
+/* 消息发送方归一化：兼容 role / sender / isUser / who 多种写法
+ * 聊天里真正落库的是 role:'user' / 'dream'，sender 只有转账、礼物等类型才带，
+ * 所以我发的消息必须能用 role:'user'、isUser:true、sender:'user' 任意一种匹配到 */
 function wcMsgSender(m) {
-  if (m.sender === 'user' || m.sender === 'ta') return m.sender;
+  if (m.sender === 'ta') return 'ta';
+  if (m.sender === 'user' || m.sender === 'me') return 'user';
+  if (m.isUser === true || m.mine === true) return 'user';
   if (m.who === 'me') return 'user';
-  if (m.role === 'user') return 'user';
+  if (m.who === 'ta') return 'ta';
+  if (m.role === 'user' || m.role === 'me') return 'user';
   if (m.role === 'system') return '';        /* 系统提示不参与统计 */
   return 'ta';
+}
+
+/* 取消息正文：TA 的消息可能落在 text 字段，我发的可能落在 content 字段，两者都兼容；
+ * 图片 / 表情包等非文字内容（没有文本字段）返回空串，后续直接被跳过 */
+function wcMsgText(m) {
+  const raw = m.text != null ? m.text : (m.content != null ? m.content : m.msg);
+  if (raw == null) return '';
+  if (typeof raw === 'string') return raw.trim();
+  if (typeof raw === 'object' && typeof raw.text === 'string') return raw.text.trim();
+  return '';
 }
 
 /* 按时间维度 + 对象维度，取出当前梦角聊天记录里的纯文字内容 */
@@ -8622,27 +8575,22 @@ function wcCollectTexts(roleId, timeTab, whoTab) {
   const wantSender = whoTab === 'ta' ? 'ta' : 'user';
   return list.filter(m => {
     if (!m || m.recalled) return false;
-    /* 只统计普通文字气泡：转账/礼物/表情/通话/问卷等带 type 的消息不参与 */
-    if (m.type && m.type !== 'text') return false;
+    /* 只统计纯文字消息：图片 / 表情包 / 转账 / 礼物 / 通话 / 问卷一律跳过 */
+    const type = m.type || 'text';
+    if (type !== 'text') return false;
     if (wcMsgSender(m) !== wantSender) return false;
-    if (!m.content || !String(m.content).trim()) return false;
+    if (!wcMsgText(m)) return false;
     const ts = wcMsgTs(m);
     return ts > 0 && ts >= start && ts <= now + 60 * 1000;   /* 允许 1 分钟时钟误差 */
-  }).map(m => String(m.content));
+  }).map(m => wcMsgText(m));
 }
 
-/* 轻量中文词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15]] 格式
- * 流程：超级正则切分 → 片段清洗（去数字/字母/emoji/符号）→
- *       2~6 字整段成词；>6 字先查字卡库核心词，查不到再停用字切分 + 滑窗 */
+/* 最简词频统计：产出 [['想你', 25], ['开心', 18], ['晚安', 15]] 格式
+ * 全程只有 split + forEach，没有任何 while 循环，结构上不可能死循环
+ * 规则：超级正则切分 → 只保留汉字 → 2~6 字且非停用词的片段计数 → 降序取前 40 */
 function wcBuildList(texts) {
   const freq = Object.create(null);
-  const add = w => {
-    const word = String(w || '');
-    if (!word || word.length < 2 || wcIsStopWord(word)) return;
-    freq[word] = (freq[word] || 0) + 1;
-  };
-  const dict = wcBuildDict();
-  let budget = WC_MAX_TOTAL_CHARS;   /* 总字符预算：多条超长消息叠加也不会拖死主线程 */
+  let budget = WC_MAX_TOTAL_CHARS;   /* 总字符预算：超长文本叠加也不会拖死主线程 */
 
   texts.forEach(t => {
     if (budget <= 0) return;
@@ -8650,37 +8598,24 @@ function wcBuildList(texts) {
     /* 单条消息硬截断：防止一条几万字的文本把内存撑爆 */
     if (raw.length > WC_MAX_TEXT_LEN) raw = raw.slice(0, WC_MAX_TEXT_LEN);
     budget -= raw.length;
-    /* ① 空格、换行、制表符、全部中英文标点与特殊符号 → 一刀切
-       这样绝不可能出现跨行、跨空格、跨标点的连词 */
+    /* 空格、换行、制表符、全部中英文标点与特殊符号一律作为分割线 */
     raw.split(WC_SPLIT_RE).forEach(piece => {
-      /* ② 清洗：只保留汉字，纯数字 / 纯符号 / 纯表情片段会变成空串被丢弃 */
-      const clean = wcCleanFragment(piece);
-      if (!clean || clean.length < 2) return;
-      /* ③ 2~6 字的自然短语（晚安 / 做个好梦 / 抱抱你）直接计数 */
-      if (clean.length <= 6) { add(clean); return; }
-      /* ④ 超过 6 字的长句：先截断到安全长度，再查字卡库，查不到才兜底切分 */
-      const frag = clean.length > WC_MAX_FRAG_LEN ? clean.slice(0, WC_MAX_FRAG_LEN) : clean;
-      if (!wcExtractLong(frag, dict, add)) wcFallbackLong(frag, add);
+      const clean = wcCleanFragment(piece);              /* 纯数字/字母/emoji/符号 → 空串 */
+      if (clean.length < 2 || clean.length > 6) return;  /* 只保留 2~6 字自然短语 */
+      if (wcIsStopWord(clean)) return;                   /* 过滤停用词 */
+      freq[clean] = (freq[clean] || 0) + 1;
     });
   });
 
-  let arr = Object.keys(freq).map(w => [w, freq[w]]);
-  arr.sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);  /* 频次降序，同频长词优先 */
-  /* 候选足够多时丢弃只出现 1 次的长尾噪声 */
-  if (arr.length > 40) arr = arr.filter(([, c]) => c >= 2);
-  /* 子串去重：已入选的词若包含当前词且频次不输，则跳过当前词 */
-  const picked = [];
-  for (const item of arr) {
-    if (picked.some(([pw, pc]) => pw !== item[0] && pw.includes(item[0]) && pc >= item[1])) continue;
-    picked.push(item);
-    if (picked.length >= 60) break;
-  }
-  return picked;
+  return Object.keys(freq)
+    .map(w => [w, freq[w]])
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)  /* 频次降序，同频长词优先 */
+    .slice(0, WC_MAX_WORDS);                                   /* 最多 40 个，绝不多传 */
 }
 
 /* 渲染前数据清洗（词云库与排行榜共用）：
  * 只接受 [['词语', 正数频次], ...] 的数组格式，剔除空词、NaN / undefined / null / 非正数频次，
- * 按频次降序后最多取 60 个 —— 词数过多或格式异常都会让 wordcloud2.js 卡死 */
+ * 按频次降序后最多取 40 个 —— 词数过多或格式异常都会让 wordcloud2.js 卡死 */
 function wcSanitizeList(list) {
   const out = [];
   (Array.isArray(list) ? list : []).forEach(item => {
@@ -8692,7 +8627,7 @@ function wcSanitizeList(list) {
     out.push([word, count]);
   });
   out.sort((a, b) => b[1] - a[1] || b[0].length - a[0].length);
-  return out.slice(0, 60);
+  return out.slice(0, WC_MAX_WORDS);
 }
 
 /* 词云页：返回键 + 标题 + 双筛选标签 + canvas 容器 */
@@ -8765,7 +8700,7 @@ function drawWordCloud() {
     return;
   }
 
-  /* ② 取数 + 词频统计 → 严格清洗成 [['词语', 频次], ...] 数组，最多 60 个词 */
+  /* ② 取数 + 词频统计 → 严格清洗成 [['词语', 频次], ...] 数组，最多 40 个词 */
   const texts = wcCollectTexts(wcRoleId || state.activeRoleId, wcTimeTab, wcWhoTab);
   const list = wcSanitizeList(wcBuildList(texts));
   if (!list.length) {
@@ -8788,10 +8723,9 @@ function drawWordCloud() {
     cssW = (stage && stage.clientWidth ? stage.clientWidth - 16 : 0) || 300;
   }
   const cssH = 400;
-  const dpr = window.devicePixelRatio || 1;
-  /* 重置 backing store：同时清空上一轮绘制的残留，高分屏下文字也不糊 */
-  canvas.width = Math.max(1, Math.round(cssW * dpr));
-  canvas.height = Math.max(1, Math.round(cssH * dpr));
+  /* 画布 1:1 像素（不再乘 dpr），配合 weightFactor 0.5 / gridSize 16，字号与布局都可预期 */
+  canvas.width = Math.max(1, Math.round(cssW));
+  canvas.height = Math.max(1, cssH);
 
   /* 底部排行榜：与词云共用同一份词频数组，取前 10 名 */
   if (rankEl) {
@@ -8805,18 +8739,15 @@ function drawWordCloud() {
     rankEl.classList.remove('hidden');
   }
 
-  /* ④ 延迟 100ms 再画：先让页面与筛选按钮正常显示，避免一进词云页就白屏卡死 */
+  /* ④ 延迟 200ms 再画：先让页面与筛选按钮正常显示，避免一进词云页就白屏卡死 */
   setTimeout(() => {
     /* 过期任务直接作废；canvas 不在文档中（已返回/切页）也放弃本次渲染 */
     if (seq !== wcRenderSeq || !canvas.isConnected) return;
     try {
       WordCloud(canvas, {
         list,
-        gridSize: Math.max(4, Math.round(8 * dpr)),
-        weightFactor: function (count) {
-          /* 按词频放大字号，最小 14px、最大不超过 50px（CSS 像素），再乘 dpr */
-          return Math.min(50, Math.max(14, count * 4)) * dpr;
-        },
+        gridSize: 16,        /* 网格放大到 16：词少、格子大，布局算法不会死循环 */
+        weightFactor: 0.5,   /* 字号权重压到 0.5：高频词也不会撑爆画布 */
         fontFamily: 'sans-serif',
         fontWeight: 600,
         color: function () {
