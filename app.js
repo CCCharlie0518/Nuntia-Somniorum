@@ -231,7 +231,7 @@ function defaultState() {
       taRecallChance: 10,
       taQuoteChance: 15,
       locationCooldown: 60,
-      mergeEnabled: true,
+      mergeChance: 50,
       mergeMin: 2,
       mergeMax: 3,
       mergeSeparator: '，',
@@ -583,7 +583,15 @@ function mergeState(saved) {
   delete out.settings.callFrequency;
   delete out.settings.defaultReplyDelay;
   if (!['，', '、', ' ', '\n'].includes(out.settings.mergeSeparator)) out.settings.mergeSeparator = '，';
-  out.settings.mergeEnabled = out.settings.mergeEnabled !== false;
+  /* 拼字卡概率 mergeChance（0~100，默认 50）替代旧开关 mergeEnabled：
+     旧存档 mergeEnabled=false → 0%（永远单张）；mergeEnabled=true 或缺省 → 50% */
+  const mcRaw = Number(out.settings.mergeChance);
+  if (Number.isFinite(mcRaw)) {
+    out.settings.mergeChance = clamp(Math.round(mcRaw), 0, 100);
+  } else {
+    out.settings.mergeChance = out.settings.mergeEnabled === false ? 0 : 50;
+  }
+  delete out.settings.mergeEnabled;
   /* 在线状态相关设置已整体移除：旧数据 / 旧备份里的字段直接丢弃 */
   ['statusAffectsCall', 'randomStatusEnabled', 'statusSwitchMin', 'statusSwitchMax', 'recallCooldown'].forEach(k => delete out.settings[k]);
   out.settings.autoSnapshotEnabled = out.settings.autoSnapshotEnabled === true;
@@ -957,11 +965,21 @@ function mergeState(saved) {
       /* 旧字段保留首图，兼容旧版导出/导入与旧读取路径 */
       image: imgs[0] || '',
       likes: Array.isArray(m.likes) ? m.likes : [],
-      comments: (Array.isArray(m.comments) ? m.comments : []).map(c =>
-        typeof c === 'string'
-          ? { id: uid(), who: 'me', name: out.my.name, text: c, ts: m.ts || Date.now() }
-          : { id: c.id || uid(), who: c.who || 'me', name: String(c.name || '我'), text: String(c.text || ''), ts: c.ts || Date.now() }
-      ),
+      comments: (Array.isArray(m.comments) ? m.comments : []).map(c => {
+        if (typeof c === 'string') {
+          return { id: uid(), who: 'me', sender: 'user', name: out.my.name, text: c, replyTo: '', ts: m.ts || Date.now() };
+        }
+        const isMe = c.who === 'me' || c.sender === 'user';
+        return {
+          id: c.id || uid(),
+          who: c.who || (isMe ? 'me' : 'ta'),
+          sender: c.sender || (isMe ? 'user' : 'ta'),    /* 统一 sender：'user' 我 / 'ta' 梦角 */
+          name: String(c.name || (isMe ? out.my.name : 'TA')),
+          text: String(c.text || ''),
+          replyTo: c.replyTo || '',                       /* 回复对象：'user' / 'ta' / '' */
+          ts: c.ts || Date.now()
+        };
+      }),
       ts: m.ts || Date.now(),
       /* TA 主动发布的动态：保留发布者归属，刷新后仍显示为该梦角 */
       fromTa: m.fromTa === true,
@@ -1922,7 +1940,17 @@ function renderMoments() {
           <button data-del-moment="${m.id}" style="margin-left:auto">删除</button>
         </div>
         ${comments.length ? `<div class="moment-comments">
-          ${comments.map(c => `<div class="comment"><b>${esc(c.name)}</b>${esc(c.text)}</div>`).join('')}
+          ${comments.map(c => {
+            const isTa = c.sender === 'ta';
+            /* 回复前缀：replyTo='user' → @我；replyTo='ta' → @该动态下 TA 的名字 */
+            let replyPrefix = '';
+            if (c.replyTo === 'user') replyPrefix = `<span class="reply-prefix">回复 @${esc(state.my.name)}：</span>`;
+            else if (c.replyTo === 'ta') {
+              const taName = (m.fromTa ? headName : (comments.find(x => x.sender === 'ta' && x.name) || {}).name) || taName();
+              replyPrefix = `<span class="reply-prefix">回复 @${esc(taName)}：</span>`;
+            }
+            return `<div class="comment"><b class="comment-${isTa ? 'ta' : 'user'}-name">${esc(c.name)}</b>${replyPrefix}${esc(c.text)}</div>`;
+          }).join('')}
         </div>` : ''}
         <div class="comment-input-row">
           <input data-comment-input="${m.id}" placeholder="说点什么…" maxlength="120">
@@ -1990,9 +2018,37 @@ function sendComment(momentId) {
   if (!text) return;
   const m = state.moments.find(x => x.id === momentId);
   if (!m) return;
-  m.comments.push({ id: uid(), who: 'me', name: state.my.name, text, ts: Date.now() });
+  /* 如果该动态里已有 TA 的评论，则本条视为「回复 TA」；否则为顶级评论 */
+  const taCommentExists = (m.comments || []).some(c => c.sender === 'ta');
+  const replyTo = taCommentExists ? 'ta' : '';
+  m.comments.push({
+    id: uid(), who: 'me', sender: 'user', name: state.my.name,
+    text, replyTo, ts: Date.now()
+  });
   persist();
   renderMoments();
+
+  /* ===== TA 追评互动 =====
+     触发条件：在 TA 的动态下评论，或本条是在回复 TA 之前的评论
+     固定 60% 概率；1.5~3 秒延迟；复用主聊天字卡抽取逻辑（受全局拼字卡概率控制） */
+  const shouldTrigger = m.fromTa === true || taCommentExists;
+  if (shouldTrigger && Math.random() < 0.6) {
+    const delay = randInt(1500, 3000);
+    setTimeout(() => {
+      const cur = state.moments.find(x => x.id === momentId);
+      if (!cur) return;
+      const role = roleById(cur.interactRoleId) || (state.roles.length ? pickOne(state.roles) : null);
+      if (!role) return;
+      const replyText = composeCardText(role.id);
+      if (!replyText) return;    /* 字卡库为空则不追评，保持原有全功能统一策略 */
+      cur.comments.push({
+        id: uid(), who: role.id, sender: 'ta', name: role.name,
+        text: replyText, replyTo: 'user', ts: Date.now()
+      });
+      persist();
+      if (currentRoute.page === 'space') renderMoments();
+    }, delay);
+  }
 }
 
 function publishMoment() {
@@ -2050,7 +2106,7 @@ function checkMomentInteractions() {
       if (Math.random() * 100 < Number(state.settings.spaceCommentChance ?? 30)) {
         const text = composeCardText(role.id);
         if (text) {
-          m.comments.push({ id: uid(), who: role.id, name: role.name, text, ts: Date.now() });
+          m.comments.push({ id: uid(), who: role.id, sender: 'ta', name: role.name, text, replyTo: '', ts: Date.now() });
           commentText = text;
         }
       }
@@ -3034,7 +3090,8 @@ function markUserRead(roleId, note) {
  * 字卡全局共享（不再区分梦角/公共），从全部启用字卡中抽取；
  * roleId 仅用于 lastReplies 防连续重复的键。
  * opt 传入 { mergeMin, mergeMax, mergeSeparator, key } 时按传入规则拼接（信件专属设置），
- * 否则回落到聊天全局的 mergeEnabled/mergeMin/mergeMax/mergeSeparator。
+ * 否则回落到聊天全局的 mergeChance（拼字卡概率）/ mergeMin / mergeMax / mergeSeparator。
+ * 字卡不足 2 张时强制单张；mergeChance 命中才拼接，否则单张。
  * 返回拼接文本；可用字卡为空时返回空串，由调用方决定兜底文案。 */
 function composeCardText(roleId, opt) {
   const st = state.settings;
@@ -3046,14 +3103,21 @@ function composeCardText(roleId, opt) {
   const o = opt || null;
   let lo = 1, hi = 1, sepRaw = '';
   if (o && Number.isFinite(Number(o.mergeMin)) && Number.isFinite(Number(o.mergeMax))) {
-    /* 信件专属拼接：不看全局 mergeEnabled，按这封信自己的规则来 */
+    /* 信件专属拼接：不看全局 mergeChance，按这封信自己的最少/最多张数规则拼接 */
     lo = clamp(Math.round(Number(o.mergeMin)), 1, 6);
     hi = clamp(Math.round(Number(o.mergeMax)), lo, 6);
     sepRaw = o.mergeSeparator == null ? '，' : String(o.mergeSeparator);
-  } else if (st.mergeEnabled) {
-    lo = clamp(Math.round(Number(st.mergeMin) || 1), 1, 6);
-    hi = clamp(Math.round(Number(st.mergeMax) || lo), lo, 6);
-    sepRaw = String(st.mergeSeparator == null ? '，' : st.mergeSeparator);
+  } else {
+    /* 全局：字卡不足 2 张时强制单张，防报错；否则按 mergeChance 概率决定单张 / 拼接 */
+    if (pool.length < 2) {
+      lo = 1; hi = 1;
+    } else if (Math.random() * 100 < Number(st.mergeChance ?? 50)) {
+      lo = clamp(Math.round(Number(st.mergeMin) || 2), 2, 6);
+      hi = clamp(Math.round(Number(st.mergeMax) || lo), lo, 6);
+      sepRaw = String(st.mergeSeparator == null ? '，' : st.mergeSeparator);
+    } else {
+      lo = 1; hi = 1;   /* 未命中概率：单张回复 */
+    }
   }
 
   const n = clamp(randInt(lo, hi), 1, Math.min(6, pool.length));
@@ -4376,18 +4440,20 @@ function renderHomePage() {
     const hasTodo = todosOn(ym.y, ym.m, d).some(t => !t.isCompleted);
     const pInfo = periodsOn(ym.y, ym.m, d);
     const dailyList = dailyRemindersOn(ym.y, ym.m, d);
-    /* 叠加标记：红条 / 预测空心点 / 蓝黄绿点 / cdot / tdot */
-    let marksHtml = '';
-    if (pInfo.periods.length) marksHtml += '<i class="redbar"></i>';  /* 历史/进行中：红条 */
-    else if (pInfo.predicted) marksHtml += '<i class="pred-dot"></i>';  /* 预测：浅红空心点 */
-    const typeSet = new Set();
-    dailyList.forEach(r => typeSet.add(r.type));
-    typeSet.forEach(t => {
-      const meta = REMINDER_TYPES[t];
-      if (meta) marksHtml += `<i class="${meta.dotCls}"></i>`;
-    });
-    marksHtml += `${has ? '<i class="cdot"></i>' : ''}${hasTodo ? '<i class="tdot"></i>' : ''}`;
-    cells += `<div class="cal-day${isToday ? ' today' : ''}${homeSelectedDay === key ? ' sel' : ''}" data-day="${d}">${d}${marksHtml}</div>`;
+    /* ===== 标记分层 =====
+       · 经期（进行中/历史）= redbar 整天浅红底；预测经期 = pred-dot 虚线红圈。
+         这两类是「背景装饰」，不占用下方小圆点的名额，优先级最高。
+       · 小圆点按「纪念日 > 日常提醒 > 待办」优先级，每类最多 1 个，总数 ≤ 4。
+         日常提醒取当天第一个出现的类型的代表色（每类只出 1 个点，避免 3 色点溢出）。 */
+    const periodBg = pInfo.periods.length ? '<i class="redbar"></i>'
+                    : pInfo.predicted   ? '<i class="pred-dot"></i>' : '';
+    const dotMarks = [];
+    if (has) dotMarks.push('cdot');                              /* 纪念日：红点 */
+    const firstRem = dailyList.find(r => REMINDER_TYPES[r.type]);
+    if (firstRem) dotMarks.push(REMINDER_TYPES[firstRem.type].dotCls);  /* 提醒：首个类型颜色 */
+    if (hasTodo) dotMarks.push('tdot');                          /* 待办：蓝点 */
+    const dotsHtml = dotMarks.slice(0, 4).map(c => `<i class="${c}"></i>`).join('');
+    cells += `<div class="cal-day${isToday ? ' today' : ''}${homeSelectedDay === key ? ' sel' : ''}" data-day="${d}">${periodBg}${d}<div class="calendar-dots-container">${dotsHtml}</div></div>`;
   }
   const tail = (7 - (startDow + daysInMonth) % 7) % 7;
   for (let i = 1; i <= tail; i++) cells += `<div class="cal-day dim">${i}</div>`;
@@ -4676,6 +4742,14 @@ function renderHomePage() {
         cancelLP();
         lpTimer = setTimeout(() => { lpTimer = null; enterHomeEditMode(); }, 500);
       });
+      /* 手指移动超过 10px 视为滑动翻页/滚动，取消长按——
+         安卓修复后横向滑动不再派发 pointercancel，必须在这里主动取消，否则滑动途中误进编辑态 */
+      let lpX = 0, lpY = 0;
+      el.addEventListener('pointerdown', e => { lpX = e.clientX; lpY = e.clientY; });
+      el.addEventListener('pointermove', e => {
+        if (!lpTimer) return;
+        if (Math.abs(e.clientX - lpX) > 10 || Math.abs(e.clientY - lpY) > 10) cancelLP();
+      });
       el.addEventListener('pointerup', cancelLP);
       el.addEventListener('pointercancel', cancelLP);
       el.addEventListener('pointerleave', cancelLP);
@@ -4691,16 +4765,20 @@ function renderHomePage() {
     exitHomeEditMode();
   }));
 
-  /* 左右滑动 / 圆点切换分页；滑动后抑制误触点击 */
+  /* 左右滑动 / 圆点切换分页；滑动后抑制误触点击。
+     安卓修复：touch-action:pan-y（CSS）保证横向手势不被浏览器抢走；
+     setPointerCapture 保证手指滑出元素/屏幕边缘时 move、up 事件依然送达 */
   const pager = $('#homePager');
   let swX = 0, swY = 0, swOn = false, swMoved = false;
   pager.addEventListener('pointerdown', e => {
     if (homeEditMode) { swOn = false; return; }
     swOn = true; swMoved = false; swX = e.clientX; swY = e.clientY;
+    try { pager.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
   });
   pager.addEventListener('pointermove', e => {
     if (!swOn) return;
     const dx = e.clientX - swX, dy = e.clientY - swY;
+    /* 方向判定：只有横向位移明显大于纵向才视为翻页手势，纵向滑动不干预（也不 preventDefault） */
     if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy)) swMoved = true;
   });
   const swEnd = e => {
@@ -8049,27 +8127,96 @@ function nextTaGiftDelay() {
   return randInt(240, 480) * 60 * 1000;
 }
 
+/* ===== TA 自创礼物词库（通用，任何梦角人设都能代入） ===== */
+const customGiftPrefix = ["亲手折的", "特意为你定制的", "攒了很久买的", "藏在口袋里带过来的", "熬夜为你做的", "逛街时一眼看中的", "偷偷捡回来的", "从很远的远方带回来的", "用体温焐热的", "路边摘的", "自己录制的", "不好意思拿出手的", "准备了很久的", "下雨天捡到的", "用心写的", "小心翼翼包好的", "跑了好远去买的", "一直收藏着的", "悄悄塞进你包里的", "第一次做给你的"];
+const customGiftItems = [
+  { name: "一朵小花", emoji: "🌸" }, { name: "手写情书", emoji: "💌" },
+  { name: "平安符", emoji: "🧿" }, { name: "千纸鹤", emoji: "🕊️" },
+  { name: "小星星", emoji: "⭐" }, { name: "一片落叶", emoji: "🍂" },
+  { name: "糖果", emoji: "🍬" }, { name: "一个拥抱", emoji: "🫂" },
+  { name: "一个晚安吻", emoji: "💋" }, { name: "他的外套", emoji: "🧥" },
+  { name: "他的围巾", emoji: "🧣" }, { name: "一枚硬币", emoji: "🪙" },
+  { name: "满天星辰", emoji: "🌌" }, { name: "一首歌", emoji: "🎵" },
+  { name: "一段录音", emoji: "🎙️" }, { name: "一个承诺", emoji: "🤙" },
+  { name: "他的发丝", emoji: "🪮" }, { name: "一个钥匙扣", emoji: "🔑" },
+  { name: "一本写满你的日记", emoji: "📔" }, { name: "一片秋天的枫叶", emoji: "🍁" },
+  { name: "一根红线", emoji: "🧵" }, { name: "他的护身符", emoji: "📿" },
+  { name: "一个专属树洞", emoji: "🌳" }, { name: "陪你的一整天", emoji: "🌞" },
+  { name: "一杯热奶茶", emoji: "🧋" }, { name: "一束玫瑰", emoji: "🌹" },
+  { name: "一盒巧克力", emoji: "🍫" }, { name: "一条手链", emoji: "📿" },
+  { name: "一个小玩偶", emoji: "🧸" }, { name: "他珍贵的徽章", emoji: "🎖️" },
+  { name: "一张写满字的便利贴", emoji: "📝" }, { name: "一场烟花", emoji: "🎆" }
+];
+/* 自创礼物附带的前缀句（第二条气泡） */
+const customGiftPrefixPhrases = [
+  "这是我自己做的，希望你喜欢。",
+  "没花钱，但是心意是真的。",
+  "专门为你准备的，不许嫌弃哦。",
+  "虽然不值钱，但我想了很久。",
+  "给你，别告诉别人。"
+];
+/* 从词库随机拼接，返回 { name, emoji } */
+function generateCustomGift() {
+  const prefix = pickOne(customGiftPrefix);
+  const item = pickOne(customGiftItems);
+  return { name: prefix + ' ' + item.name, emoji: item.emoji };
+}
+
 function taSendGift(roleId) {
   const role = roleById(roleId);
-  if (!role || !state.gifts.length) return;
-  const gift = pickOne(state.gifts);
-  if (!gift) return;
-  const price = Math.max(0, Math.round((Number(gift.price) || 0) * 100) / 100);
+  if (!role) return;
+  /* 30% 概率送「TA 自创礼物」（无需礼物库，不扣钱包）；否则从礼物库随机挑 */
+  const useCustom = Math.random() < 0.3;
+  let giftName, emoji, price, isCustom;
+  if (useCustom) {
+    const cg = generateCustomGift();
+    giftName = cg.name;
+    emoji = cg.emoji;
+    price = 0;          /* 自创礼物：不扣款 */
+    isCustom = true;
+  } else {
+    if (!state.gifts.length) return;
+    const gift = pickOne(state.gifts);
+    if (!gift) return;
+    giftName = gift.name;
+    emoji = gift.emoji || '🎁';
+    price = Math.max(0, Math.round((Number(gift.price) || 0) * 100) / 100);
+    isCustom = false;
+  }
   const rec = {
     id: uid(), roleId, roleName: role.name,
-    giftName: gift.name, emoji: gift.emoji || '🎁', price,
-    direction: 'in', claimed: false, note: '', ts: Date.now()
+    giftName, emoji, price,
+    direction: 'in', claimed: false, note: '', ts: Date.now(),
+    isCustom                          /* 标记是否为 TA 自创礼物 */
   };
   state.giftHistory.unshift(rec);
   if (state.giftHistory.length > 300) state.giftHistory.length = 300;
   persist();
-  /* TA 送来的礼物显示深色接收卡片（待我收下） */
+  /* TA 送来的礼物显示深色接收卡片（待我收下），卡片样式与普通礼物完全一致 */
   pushDreamMessage(roleId, {
-    sender: 'ta', type: 'gift', giftRecordId: rec.id, giftName: rec.giftName,
-    emoji: rec.emoji, price, note: '', direction: 'in', claimed: false
+    sender: 'ta', type: 'gift', giftRecordId: rec.id, giftName,
+    emoji, price, note: '', direction: 'in', claimed: false
   });
   showToast(taName(role.id) + ' 送了你一份礼物');
   if (currentRoute.page === 'sub' && currentRoute.name === 'gifts') renderGiftPage();
+
+  /* 自创礼物：延迟连发两条气泡 —— 前缀句 + 字卡库感谢语 */
+  if (isCustom) {
+    setTimeout(() => {
+      if (!roleById(roleId)) return;
+      pushDreamMessage(roleId, { type: 'text', content: pickOne(customGiftPrefixPhrases) });
+      renderChatIf(roleId);
+      refreshMessagesPage();
+      /* 再延迟约 1 秒，从主字卡库抽一句感谢语（受全局拼字卡概率控制） */
+      setTimeout(() => {
+        if (!roleById(roleId)) return;
+        sendTaBurst(roleId, {
+          makeText: prev => composeUniqueReply(roleId, prev),
+          fallback: '谢谢你收下。'
+        });
+      }, 1000);
+    }, 1000);
+  }
 }
 
 /* 我收下 TA 送来的礼物：卡片变浅色，状态更新为已收下 */
@@ -8103,7 +8250,7 @@ function checkTaGifts() {
   state.nextTaGiftAt = now + nextTaGiftDelay();
   persist();
   if (Math.random() * 100 >= Number(state.settings.taGiftChance ?? 20)) return;
-  if (!state.roles.length || !state.gifts.length) return;
+  if (!state.roles.length) return;
   taSendGift(pickOne(state.roles).id);
 }
 
@@ -8152,7 +8299,7 @@ function renderGiftPage() {
         <div class="list-row" style="display:flex;align-items:center;gap:10px;padding:10px 2px">
           <div style="font-size:20px">${esc(h.emoji || '🎁')}</div>
           <div class="grow" style="min-width:0">
-            <div style="font-size:13px;font-weight:600">${incoming ? esc(h.roleName) + ' 送给你 ' + esc(h.giftName) : esc(h.giftName) + ' → ' + esc(h.roleName)}</div>
+            <div style="font-size:13px;font-weight:600">${incoming ? esc(h.roleName) + ' 送给你 ' + esc(h.giftName) : esc(h.giftName) + ' → ' + esc(h.roleName)}${h.isCustom ? ' <span class="custom-gift-tag">✨ TA自创</span>' : ''}</div>
             <div class="muted" style="font-size:11px;margin-top:2px">${incoming ? esc(dn) + '送我' : '我送' + esc(dn)} · ${fmtMsgTime(h.ts)}</div>
           </div>
         </div>`;
@@ -11881,13 +12028,7 @@ function renderProbabilityPage() {
       ${sliderRowHTML('表情包发送概率', `普通回复命中后，本次改为发送一张共享表情包的概率；表情包与「表情包管理」共用同一套库，库为空时自动回退为字卡回复；表情包单条发送，不参与拼接与连发`, 'emojiSendChance', s.emojiSendChance, 0, 100, '%')}
       ${sliderRowHTML('最短回复时间', `${dn} 收到消息后至少等待多久再回复，单位：秒；0 表示不等待`, 'replyDelayMin', s.replyDelayMin, 0, 300, '秒')}
       ${sliderRowHTML('最长回复时间', `不得小于最短回复时间；对所有 ${dn} 消息（字卡回复、礼物感谢、收款提示、链接测试结果、通话与空间互动等）生效`, 'replyDelayMax', s.replyDelayMax, 0, 300, '秒')}
-      <div class="slider-row row-between">
-        <div>
-          <div style="font-size:13px">字卡拼接</div>
-          <div class="muted">一次回复拼接多张字卡</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMerge" ${s.mergeEnabled ? 'checked' : ''}><span class="slider"></span></label>
-      </div>
+      ${sliderRowHTML('拼字卡概率', '命中概率时拼接多张字卡，未命中则只发单张；对所有字卡回复生效', 'mergeChance', s.mergeChance, 0, 100, '%')}
       ${sliderRowHTML('拼接最少张数', '最少 2 张；字卡不足时按实际数量拼接', 'mergeMin', s.mergeMin, 2, 6, '张')}
       ${sliderRowHTML('拼接最多张数', '最大值不得小于最小值', 'mergeMax', s.mergeMax, 2, 6, '张')}
       <div class="slider-row">
@@ -12010,6 +12151,7 @@ function renderProbabilityPage() {
   bindProbSlider('taRecallChance', 'taRecallChanceRange', 'taRecallChanceNum', 0, 100);
   bindProbSlider('taQuoteChance', 'taQuoteChanceRange', 'taQuoteChanceNum', 0, 100);
   bindProbSlider('locationCooldown', 'locationCooldownRange', 'locationCooldownNum', 0, 3600);
+  bindProbSlider('mergeChance', 'mergeChanceRange', 'mergeChanceNum', 0, 100);
   bindProbSlider('mergeMin', 'mergeMinRange', 'mergeMinNum', 2, 6);
   bindProbSlider('mergeMax', 'mergeMaxRange', 'mergeMaxNum', 2, 6);
   bindProbSlider('burstMin', 'burstMinRange', 'burstMinNum', 1, 6);
@@ -12041,10 +12183,6 @@ function renderProbabilityPage() {
   syncAutoSnapshotInputs();
   syncSpaceProactiveInputs();
 
-  $('#setMerge').addEventListener('change', e => {
-    state.settings.mergeEnabled = e.target.checked;
-    persist();
-  });
   $('#setSeparator').addEventListener('change', e => {
     state.settings.mergeSeparator = e.target.value;
     persist();
