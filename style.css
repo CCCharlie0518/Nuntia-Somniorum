@@ -3221,3 +3221,67 @@ canvas.gmk{display:block;width:100%;aspect-ratio:1/1;touch-action:manipulation;c
   #splash-loading span{animation:none;}
   #splash-content{transition:opacity .3s linear;}
 }
+/* ===================== 美化页 - 样式自定义 ===================== */
+/* 分类切换：两个等宽胶囊按钮 */
+.cs-tabs{display:flex;gap:8px;margin-bottom:10px;}
+.cs-tab{
+  flex:1;height:38px;border-radius:10px;background:#F7F7FA;
+  font-size:13px;color:#3C3C43;border:1px solid transparent;
+  transition:background .15s,color .15s,border-color .15s;
+}
+.cs-tab.active{background:var(--primary-soft);color:var(--primary);font-weight:600;border-color:rgba(var(--primary-rgb,0,122,255),.22);}
+
+/* 操作栏：复制模板 / 上传字体 */
+.cs-toolbar{display:flex;gap:8px;margin-bottom:10px;}
+.cs-toolbar .btn{flex:1;height:38px;font-size:13px;}
+/* 清空按钮：不参与等分，浅红文字 + 浅红底，和「复制模板 / 上传字体」区分开 */
+.cs-toolbar .btn.cs-clear{flex:0 0 auto;padding:0 14px;color:#FF3B30;background:rgba(255,59,48,.10);}
+
+/* 代码输入区：等宽字体，方便对齐属性 */
+.cs-input{
+  width:100%;min-height:128px;border-radius:12px;
+  border:.5px solid rgba(60,60,67,.14);background:#F7F7FA;
+  padding:10px 11px;font-size:12.5px;line-height:1.6;color:#1C1C1E;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  resize:vertical;outline:none;transition:border-color .15s,background .15s;
+}
+.cs-input:focus{border-color:var(--primary);background:#fff;}
+
+/* 共用预览区：DOM 与聊天页完全一致（.msg.theirs / .msg.mine > .msg-body > .bubble），
+   气泡底色/文字色直接沿用 style.css 里聊天页的真实规则，保证预览与真实聊天 100% 一致 */
+.cs-preview{
+  display:flex;flex-direction:column;gap:10px;margin:10px 0 12px;padding:12px;
+  border-radius:14px;background:#fff;border:.5px solid rgba(60,60,67,.10);overflow:hidden;
+}
+.cs-preview .bubble{max-width:78%;width:fit-content;}
+.cs-test-text{
+  font-size:14px;color:#1C1C1E;text-align:center;padding:8px 0 2px;
+  border-top:1px dashed #E5E5EA;word-break:break-all;
+}
+
+/* 预设列表 */
+.cs-preset-list{display:flex;flex-direction:column;gap:8px;}
+.cs-preset{display:flex;align-items:center;gap:6px;padding:6px 6px 6px 10px;border-radius:12px;background:#F7F7FA;}
+.cs-preset-main{flex:1;display:flex;align-items:center;gap:8px;min-width:0;padding:4px 0;text-align:left;}
+.cs-badge{
+  flex-shrink:0;font-size:10px;line-height:1;padding:4px 6px;border-radius:6px;
+  background:var(--primary-soft);color:var(--primary);font-weight:600;
+}
+.cs-preset-name{flex:1;min-width:0;font-size:13px;color:#1C1C1E;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cs-preset-del{
+  width:28px;height:28px;border-radius:50%;background:#fff;color:#FF3B30;
+  font-size:16px;line-height:1;display:grid;place-items:center;flex-shrink:0;
+}
+.cs-empty{font-size:12px;color:#8E8E93;padding:10px 2px;text-align:center;}
+
+/* 识别并应用：主色按钮 + 状态标签（标签换行占满一整行，按钮不会被挤窄） */
+.cs-apply-row{align-items:flex-start;}
+.cs-apply-row .btn{flex:1;}
+.cs-apply-status{
+  flex:1 1 100%;min-height:18px;margin-top:2px;
+  font-size:12px;line-height:1.5;color:var(--sub);word-break:break-all;
+}
+.cs-apply-status.ok{color:#22c55e;font-weight:600;}
+.cs-apply-status.error{color:#FF3B30;font-weight:600;}
+.cs-apply-status.warn{color:#f59e0b;font-weight:600;}
+.cs-apply-status.info{color:#8E8E93;}
