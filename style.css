@@ -600,11 +600,21 @@ input[type="time"],
 .role-manage:last-child{border-bottom:0;}
 
 /* ===================== 字卡 ===================== */
-.card-item{background:#fff;border-radius:12px;padding:12px 13px;margin-bottom:9px;box-shadow:var(--shadow);}
+/* 卡片：扁平结构（去掉多余包裹层）+ content-visibility 渲染隔离。
+   长列表滚动时只绘制可视区域，不再整页重排/重绘；卡片上没有 backdrop-filter 等
+   高耗能属性，只有普通的 background 与 box-shadow */
+.card-item{
+  background:#fff;border-radius:12px;padding:12px 13px;margin-bottom:9px;box-shadow:var(--shadow);
+  content-visibility:auto;contain-intrinsic-size:auto 96px;
+}
 .card-item.disabled{opacity:.55;}
-.card-text{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;margin:5px 0 8px;}
+/* 分组标签直接挂在卡片根部；用两条类名提高优先级，覆盖后面 .chip 的尺寸 */
+.card-item .card-tag{display:inline-flex;margin:0 0 5px;padding:3px 9px;font-size:11px;}
+.card-text{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;margin:0 0 8px;}
 .card-ops{display:flex;gap:8px;align-items:center;}
 .card-ops .spacer{flex:1;}
+/* 「加载更多」：只在字卡超过首屏渲染上限（100 张）时出现 */
+.card-more{width:100%;margin:0 0 9px;}
 .filter-row{display:flex;gap:8px;margin-bottom:10px;}
 .filter-row .select{flex:1;padding:8px 10px;font-size:13px;}
 .group-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center;}
@@ -714,6 +724,18 @@ input[type="time"],
 .stat-cell{background:#fff;border-radius:12px;padding:11px 6px;text-align:center;box-shadow:var(--shadow);}
 .stat-cell .num{font-size:18px;font-weight:600;color:var(--primary-dark);}
 .stat-cell .lbl{font-size:11px;color:#9aa0aa;margin-top:3px;}
+
+/* ---- 存储体检：分类占用明细（按大小排序，带占比条） ---- */
+.storage-usage-line{font-size:12.5px;color:var(--sub);margin:2px 0 10px;}
+.sb-list{display:flex;flex-direction:column;gap:9px;}
+.sb-row{display:flex;flex-direction:column;gap:5px;}
+.sb-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px;}
+.sb-name{font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.sb-size{font-size:12px;color:var(--sub);flex-shrink:0;font-variant-numeric:tabular-nums;}
+.sb-bar{height:6px;border-radius:3px;background:#eef1f5;overflow:hidden;}
+.sb-bar i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--primary),var(--primary-2));}
+.sb-section{font-size:11.5px;color:#9aa0aa;margin-top:12px;padding-top:10px;border-top:1px dashed var(--line);}
+.sb-empty{font-size:12px;color:#b6bac2;padding:8px 0 2px;}
 
 /* ===================== 空间：3 区块 flex 布局（朋友圈风） ===================== */
 #page-space.active{
@@ -3124,3 +3146,78 @@ canvas.gmk{display:block;width:100%;aspect-ratio:1/1;touch-action:manipulation;c
 /* 检查更新结果提示：复用全局 Toast（半透明黑底白字圆角），额外改为屏幕正中显示 */
 .toast.toast-center{top:50%;bottom:auto;transform:translate(-50%,-50%) scale(.96);}
 .toast.toast-center.show{transform:translate(-50%,-50%) scale(1);}
+
+/* ===================== 开屏加载动画（Splash Screen） ===================== */
+/* 全屏纯白遮罩：层级高于桌宠、弹窗与所有页面层，开屏期间完全遮住主界面 */
+#splash-screen{
+  position:fixed;inset:0;z-index:99999;
+  background-color:#ffffff;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:50px;                       /* gap 把 Loading 往下推，浮现区与 Loading 整体保持绝对居中 */
+  transition:opacity .6s ease;
+  opacity:1;
+}
+/* 淡出态：opacity 归零的同时关闭点击，避免遮罩消失瞬间挡住主界面操作 */
+#splash-screen.splash-fade{opacity:0;pointer-events:none;}
+
+/* 浮现区：初始透明并下移 20px，加 .show 后慢速上浮（1.2s 缓动） */
+#splash-content,
+#splash-content.splash-hidden{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;
+  opacity:0;transform:translateY(20px);
+  transition:opacity 1.2s ease,transform 1.2s ease;
+  will-change:opacity,transform;
+}
+#splash-content.show{opacity:1;transform:translateY(0);}
+
+/* Logo 精致特效：圆角 + 底部柔和投影 + 淡粉外发光（三层效果叠加） */
+.splash-logo{
+  width:90px;height:90px;object-fit:cover;
+  border-radius:20px;                                  /* 圆角方形；想正圆改成 50% 即可 */
+  background:#f7f3e8;                                  /* 与 Logo 米色底一致，图片未解码时不闪白 */
+  box-shadow:0 10px 30px rgba(0,0,0,.15);              /* 底部柔和阴影 */
+  filter:drop-shadow(0 0 15px rgba(255,182,193,.6));   /* 淡粉外发光；换主题色可用 var(--primary) */
+  margin-bottom:20px;
+  -webkit-backface-visibility:hidden;
+}
+
+/* 文字排版 */
+.splash-title-en{
+  font-size:22px;font-weight:700;color:#1b1d21;
+  letter-spacing:1.5px;margin-bottom:8px;
+  font-family:"Times New Roman",Georgia,"Songti SC",serif;  /* 拉丁文用衬线体更显精致 */
+}
+.splash-title-cn{font-size:14px;color:#8b909a;letter-spacing:2px;}
+
+/* Loading 波浪：每个字母独立跳动，靠 nth-child 依次延迟形成从左到右的波峰 */
+#splash-loading{
+  display:flex;align-items:center;justify-content:center;
+  height:26px;                                     /* 固定高度，淡出时不会引起居中位置跳动 */
+  transition:opacity .4s ease;
+}
+#splash-loading.splash-out{opacity:0;}
+#splash-loading span{
+  display:inline-block;font-size:16px;color:#888;
+  animation:splashBounce 1.2s ease-in-out infinite;
+}
+@keyframes splashBounce{
+  0%,100%{transform:translateY(0);opacity:.5;}
+  50%{transform:translateY(-7px);opacity:1;}
+}
+#splash-loading span:nth-child(1){animation-delay:0s;}
+#splash-loading span:nth-child(2){animation-delay:.08s;}
+#splash-loading span:nth-child(3){animation-delay:.16s;}
+#splash-loading span:nth-child(4){animation-delay:.24s;}
+#splash-loading span:nth-child(5){animation-delay:.32s;}
+#splash-loading span:nth-child(6){animation-delay:.4s;}
+#splash-loading span:nth-child(7){animation-delay:.48s;}
+#splash-loading span:nth-child(8){animation-delay:.56s;}
+#splash-loading span:nth-child(9){animation-delay:.64s;}
+#splash-loading span:nth-child(10){animation-delay:.72s;}
+
+/* 尊重系统「减弱动态效果」：关掉跳动，只保留淡入淡出 */
+@media (prefers-reduced-motion: reduce){
+  #splash-loading span{animation:none;}
+  #splash-content{transition:opacity .3s linear;}
+}

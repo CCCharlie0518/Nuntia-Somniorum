@@ -2,7 +2,7 @@
 'use strict';
 
 /* 全局版本号：显示在设置页最底部；日后发版只需改这一处 */
-const APP_VERSION = 'v7.8.0';
+const APP_VERSION = 'v7.9.0';
 
 /* =========================================================
  * 一、基础工具函数
@@ -85,37 +85,137 @@ function mixHex(hex, target, ratio) {
 /* 在线状态功能已整体移除（状态展示、随机切换、权重与召回均不再存在） */
 
 /* =========================================================
- * 二、存储层（IndexedDB 优先，localStorage 兜底）
+ * 二、存储层（IndexedDB 分表存储，localStorage 仅兜底与首次迁移）
+ *
+ * 设计目标：把体积最大的数据全部搬进 IndexedDB，彻底摆脱 localStorage 5MB 上限。
+ *   kv     : 轻量状态（不含聊天明细 / 字卡 / 书籍正文 / 图片本体）
+ *   chats  : 每个梦角一条完整聊天记录（主键 = 梦角 ID），永不截断
+ *   books  : 每本书一条：书名 + 正文段落（主键 = 书籍 ID）
+ *   cards  : 字卡 / 分组 / 拍一拍字卡
+ *   assets : 图片资源（Base64），以内容指纹为 ID；状态里只留 asset://xxx 引用
+ * 内存中的 state 仍保持原有结构（图片是 dataURL、聊天是数组），
+ * 因此所有渲染与交互代码无需改动，只在落盘/读取时做拆分与还原。
  * ========================================================= */
 const DB_NAME = 'dreamcard-db';
-const DB_STORE = 'kv';
+const DB_VERSION = 2;
+const STORE_KV = 'kv';
+const STORE_CHATS = 'chats';
+const STORE_BOOKS = 'books';
+const STORE_CARDS = 'cards';
+const STORE_ASSETS = 'assets';
+const DB_STORE = STORE_KV;          /* 兼容旧代码里的常量引用 */
 const STATE_KEY = 'dream-state-v3';
 const LEGACY_KEY = 'state-v1';
+const ASSET_PREFIX = 'asset://';
+const ASSET_MIN_LEN = 2048;         /* 只有超过这个长度的 data:image 才当作大资源外置 */
 
-const Storage = {
-  mode: 'memory', db: null,
+/* ---------------- 轻量 IndexedDB 封装：初始化 / 读 / 写 / 删 / 全表 ---------------- */
+const DB = {
+  db: null,
+  opening: null,
 
-  async init() {
-    this.db = await new Promise(resolve => {
+  open() {
+    if (this.db) return Promise.resolve(this.db);
+    if (this.opening) return this.opening;
+    this.opening = new Promise(resolve => {
       if (!window.indexedDB) return resolve(null);
       let settled = false;
-      const timer = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, 2500);
+      const done = db => { if (!settled) { settled = true; resolve(db); } };
+      /* 打开超时兜底：绝不阻塞首屏，超时则整体退回 localStorage */
+      const timer = setTimeout(() => done(null), 3000);
       try {
-        const req = indexedDB.open(DB_NAME, 1);
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
         req.onupgradeneeded = e => {
           const db = e.target.result;
-          if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
+          /* 旧库只有 kv 表：升级时补齐新表，旧数据原样保留 */
+          [STORE_KV, STORE_CHATS, STORE_BOOKS, STORE_CARDS, STORE_ASSETS].forEach(name => {
+            if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+          });
         };
-        req.onsuccess = e => {
-          if (settled) return;
-          settled = true; clearTimeout(timer); resolve(e.target.result);
-        };
-        req.onerror = () => { if (settled) return; settled = true; clearTimeout(timer); resolve(null); };
+        req.onsuccess = e => { clearTimeout(timer); done(e.target.result); };
+        req.onerror = () => { clearTimeout(timer); done(null); };
+        req.onblocked = () => { clearTimeout(timer); done(null); };
       } catch (err) {
-        clearTimeout(timer); resolve(null);
+        clearTimeout(timer);
+        done(null);
       }
+    }).then(db => {
+      this.db = db;
+      this.opening = null;
+      return db;
     });
-    if (this.db) { this.mode = 'idb'; return this.mode; }
+    return this.opening;
+  },
+
+  ready() { return !!(this.db && this.db.objectStoreNames); },
+
+  /* 统一事务执行器：返回结果或 null，任何异常都不向外抛，避免打断 UI */
+  _run(store, mode, build) {
+    return new Promise(resolve => {
+      if (!this.ready()) return resolve(null);
+      try {
+        const tx = this.db.transaction(store, mode);
+        const rq = build(tx.objectStore(store));
+        let out = null;
+        if (rq) {
+          rq.onsuccess = () => { out = rq.result; };
+          rq.onerror = () => { out = null; };
+        }
+        tx.oncomplete = () => resolve(out);
+        tx.onerror = () => resolve(null);
+        tx.onabort = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+  },
+
+  get(store, key) { return this._run(store, 'readonly', os => os.get(key)); },
+  all(store) { return this._run(store, 'readonly', os => os.getAll()); },
+  keys(store) { return this._run(store, 'readonly', os => os.getAllKeys()); },
+
+  put(store, key, value) {
+    return new Promise(resolve => {
+      if (!this.ready()) return resolve(false);
+      try {
+        const tx = this.db.transaction(store, 'readwrite');
+        tx.objectStore(store).put(value, key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+        tx.onabort = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+  },
+
+  del(store, key) {
+    return new Promise(resolve => {
+      if (!this.ready()) return resolve(false);
+      try {
+        const tx = this.db.transaction(store, 'readwrite');
+        tx.objectStore(store).delete(key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+  },
+
+  clear(store) {
+    return new Promise(resolve => {
+      if (!this.ready()) return resolve(false);
+      try {
+        const tx = this.db.transaction(store, 'readwrite');
+        tx.objectStore(store).clear();
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+  }
+};
+
+const Storage = {
+  mode: 'memory',
+
+  async init() {
+    const db = await DB.open();
+    if (db) { this.mode = 'idb'; return this.mode; }
     this.mode = this.localOK() ? 'local' : 'memory';
     return this.mode;
   },
@@ -129,16 +229,7 @@ const Storage = {
   },
 
   async get(key = STATE_KEY) {
-    if (this.mode === 'idb') {
-      return new Promise(resolve => {
-        try {
-          const tx = this.db.transaction(DB_STORE, 'readonly');
-          const rq = tx.objectStore(DB_STORE).get(key);
-          rq.onsuccess = () => resolve(rq.result || null);
-          rq.onerror = () => resolve(null);
-        } catch (e) { resolve(null); }
-      });
-    }
+    if (this.mode === 'idb') return DB.get(STORE_KV, key);
     if (this.mode === 'local') {
       try {
         const raw = localStorage.getItem(key);
@@ -149,16 +240,7 @@ const Storage = {
   },
 
   async set(data) {
-    if (this.mode === 'idb') {
-      return new Promise(resolve => {
-        try {
-          const tx = this.db.transaction(DB_STORE, 'readwrite');
-          tx.objectStore(DB_STORE).put(data, STATE_KEY);
-          tx.oncomplete = () => resolve(true);
-          tx.onerror = () => resolve(false);
-        } catch (e) { resolve(false); }
-      });
-    }
+    if (this.mode === 'idb') return DB.put(STORE_KV, STATE_KEY, data);
     if (this.mode === 'local') {
       try {
         localStorage.setItem(STATE_KEY, JSON.stringify(data));
@@ -169,12 +251,292 @@ const Storage = {
   }
 };
 
+/* ---------------- 图片资源外置：落盘写 asset 表，读取时还原成 dataURL ---------------- */
+const assetMemo = new Map();      /* dataURL → 资源 ID（字符串按引用命中，重复保存几乎零开销） */
+const assetById = new Map();      /* 资源 ID → dataURL，用于指纹碰撞校验 */
+const assetWritten = new Set();   /* 已确认写入 assets 表的资源 ID */
+let assetUsedThisSave = new Set(); /* 本轮落盘实际引用到的资源 ID（用于清理无主图片） */
+
+function isBigDataURL(v) {
+  return typeof v === 'string' && v.length >= ASSET_MIN_LEN && v.slice(0, 11) === 'data:image';
+}
+
+/* 指纹 = 长度 + 抽样字符的 FNV-1a：对几十万字符的 Base64 也只需少量运算 */
+function assetIdOf(dataURL) {
+  const hit = assetMemo.get(dataURL);
+  if (hit) return hit;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < dataURL.length; i += 53) {
+    h ^= dataURL.charCodeAt(i);
+    h = (h * 16777619) >>> 0;
+  }
+  h = (h ^ dataURL.length) >>> 0;
+  let id = 'a' + h.toString(36) + '_' + dataURL.length.toString(36);
+  const old = assetById.get(id);
+  if (old && old !== dataURL) id += '_' + (assetById.size % 997).toString(36);
+  assetMemo.set(dataURL, id);
+  assetById.set(id, dataURL);
+  return id;
+}
+
+/* 把 dataURL 登记进本次落盘资源池，返回状态里保存的引用字符串 */
+function assetRefFor(dataURL, bucket) {
+  const id = assetIdOf(dataURL);
+  assetUsedThisSave.add(id);
+  bucket.push({ id, data: dataURL });
+  return ASSET_PREFIX + id;
+}
+
+/* 递归把 asset://xxx 引用还原成真实 dataURL（就地替换，不改结构） */
+function resolveAssetRefs(root, map) {
+  if (!root || typeof root !== 'object' || !map.size) return;
+  const walk = (obj, depth) => {
+    if (!obj || typeof obj !== 'object' || depth > 8) return;
+    if (Array.isArray(obj)) {
+      for (let i = 0; i < obj.length; i++) {
+        const v = obj[i];
+        if (typeof v === 'string') {
+          if (v.slice(0, 8) === ASSET_PREFIX) obj[i] = map.get(v.slice(8)) || '';
+        } else if (v && typeof v === 'object') walk(v, depth + 1);
+      }
+      return;
+    }
+    Object.keys(obj).forEach(k => {
+      const v = obj[k];
+      if (typeof v === 'string') {
+        if (v.slice(0, 8) === ASSET_PREFIX) obj[k] = map.get(v.slice(8)) || '';
+      } else if (v && typeof v === 'object') walk(v, depth + 1);
+    });
+  };
+  walk(root, 0);
+}
+
+/* 聊天数组落盘：图片外置成引用；只有带图的少量消息会生成浅拷贝，内存数据不受影响 */
+function packChatMessages(list, assets) {
+  if (!Array.isArray(list)) return [];
+  const out = new Array(list.length);
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    if (!m || typeof m !== 'object') { out[i] = m; continue; }
+    let copy = null;
+    if (isBigDataURL(m.image)) {
+      copy = Object.assign({}, m);
+      copy.image = assetRefFor(m.image, assets);
+    }
+    if (Array.isArray(m.images)) {
+      let arr = null;
+      for (let j = 0; j < m.images.length; j++) {
+        if (isBigDataURL(m.images[j])) {
+          arr = arr || m.images.slice();
+          arr[j] = assetRefFor(m.images[j], assets);
+        }
+      }
+      if (arr) { copy = copy || Object.assign({}, m); copy.images = arr; }
+    }
+    out[i] = copy || m;
+  }
+  return out;
+}
+
+/* 轻量状态快照：聊天 / 字卡 / 书籍正文外置；任何一部分写失败就保留在 kv 里兜底 */
+function buildLightSnapshot(keep) {
+  const assets = [];
+  const light = Object.assign({}, state);
+  light.chats = keep.chats ? state.chats : {};
+  light.cards = keep.cards ? state.cards : [];
+  light.cardGroups = keep.cards ? state.cardGroups : [];
+  light.userPatCards = keep.cards ? state.userPatCards : [];
+  light.taPatCards = keep.cards ? state.taPatCards : [];
+  light.readData = Object.assign({}, state.readData, {
+    books: state.readData.books.map(b => ({
+      id: b.id,
+      name: b.name,
+      chars: b.chars,
+      ts: b.ts,
+      /* 正文默认外置；books 表写失败时保留在 kv，宁可占地方也不丢内容 */
+      paras: keep.books ? [] : (b.paras || [])
+    }))
+  });
+  /* 图片一律转引用：状态里只剩 asset://xxx，真正的 Base64 写进 assets 表 */
+  const json = JSON.stringify(light, (k, v) => (isBigDataURL(v) ? assetRefFor(v, assets) : v));
+  return { light: JSON.parse(json), assets };
+}
+
+/* 清理 localStorage 里的旧快照（只在 IndexedDB 全部写成功后才清，防止丢数据） */
+function dropLocalStorageSnapshot() {
+  try {
+    localStorage.removeItem(STATE_KEY);
+    localStorage.removeItem(LEGACY_KEY);
+  } catch (e) { /* 隐私模式可能不可用，忽略 */ }
+}
+
+/* ---------------- 落盘主流程 ---------------- */
+let heavyHydrateFailed = false;   /* 启动时读分表失败：本轮绝不覆盖分表，改用整包兜底 */
+
+async function saveStateNow() {
+  if (!state) return false;
+
+  /* 极端兜底：IndexedDB 不可用时退回旧的整包 localStorage 写法 */
+  if (Storage.mode !== 'idb') {
+    if (Storage.mode === 'local') {
+      try {
+        localStorage.setItem(STATE_KEY, JSON.stringify(state));
+        return true;
+      } catch (e) { return false; }
+    }
+    return false;
+  }
+
+  /* 读分表失败时：绝不用内存里的空数据覆盖旧分表，只整包写 kv 保命 */
+  if (heavyHydrateFailed) {
+    const light = Object.assign({}, state);
+    const ok = await DB.put(STORE_KV, STATE_KEY, light);
+    if (!ok) showToast('数据读取异常，本次未覆盖存储，请刷新页面后重试');
+    return ok;
+  }
+
+  let chatsOk = true;
+  let booksOk = true;
+  let cardsOk = true;
+  const assets = [];
+  assetUsedThisSave = new Set();
+
+  /* ① 聊天记录：按梦角 ID 一条一条存，全量保存、绝不截断 */
+  const roleIds = Array.from(new Set(state.roles.map(r => r.id).concat(Object.keys(state.chats || {}))));
+  for (const rid of roleIds) {
+    const list = (state.chats && state.chats[rid]) || [];
+    const packed = packChatMessages(list, assets);
+    const ok = await DB.put(STORE_CHATS, rid, packed);
+    if (!ok) chatsOk = false;
+  }
+
+  /* ② 一起读书：正文段落单独存（主键 = 书籍 ID），kv 里只留书名/进度等轻量信息 */
+  for (const b of state.readData.books) {
+    const ok = await DB.put(STORE_BOOKS, b.id, {
+      id: b.id, name: b.name, chars: b.chars, ts: b.ts, paras: b.paras || []
+    });
+    if (!ok) booksOk = false;
+  }
+
+  /* ③ 字卡 / 分组 / 拍一拍字卡 */
+  cardsOk = await DB.put(STORE_CARDS, 'main', {
+    cards: state.cards,
+    cardGroups: state.cardGroups,
+    userPatCards: state.userPatCards,
+    taPatCards: state.taPatCards
+  });
+
+  /* ④ 轻量状态（图片转引用；哪部分外置失败就整段保留在 kv） */
+  const snap = buildLightSnapshot({ chats: chatsOk, cards: cardsOk, books: booksOk });
+
+  /* ⑤ 先写图片资源，再写 kv：保证 kv 里的引用一定能被还原 */
+  const pool = assets.concat(snap.assets);
+  for (const a of pool) {
+    if (assetWritten.has(a.id)) continue;
+    if (await DB.put(STORE_ASSETS, a.id, a.data)) assetWritten.add(a.id);
+  }
+
+  const kvOk = await DB.put(STORE_KV, STATE_KEY, snap.light);
+
+  /* 顺手清理没有被任何数据引用的旧图片（换壁纸、删表情后留下的孤儿资源） */
+  if (kvOk) {
+    try {
+      const keys = await DB.keys(STORE_ASSETS);
+      if (keys) {
+        for (const k of keys) {
+          if (!assetUsedThisSave.has(String(k))) {
+            await DB.del(STORE_ASSETS, String(k));
+            assetWritten.delete(String(k));
+          }
+        }
+        assetById.forEach((url, id) => {
+          if (!assetUsedThisSave.has(id)) { assetById.delete(id); assetMemo.delete(url); }
+        });
+      }
+    } catch (e) { /* 清理失败不影响主流程 */ }
+  }
+
+  if (kvOk && chatsOk && booksOk && cardsOk) dropLocalStorageSnapshot();
+  return kvOk;
+}
+
+/* ---------------- 启动时从分表还原：聊天 / 字卡 / 书籍正文 / 图片 ---------------- */
+async function hydrateHeavyData() {
+  if (Storage.mode !== 'idb' || !DB.ready()) return;
+  heavyHydrateFailed = false;
+
+  /* 图片池：一次性读出，供状态与聊天里的 asset:// 引用还原 */
+  const assetMap = new Map();
+  try {
+    const keys = await DB.keys(STORE_ASSETS);
+    if (!keys) heavyHydrateFailed = true;
+    if (keys && keys.length) {
+      const vals = await DB.all(STORE_ASSETS);
+      if (vals) {
+        keys.forEach((k, i) => {
+          if (typeof vals[i] === 'string') { assetMap.set(String(k), vals[i]); assetWritten.add(String(k)); }
+        });
+      }
+    }
+  } catch (e) { /* 资源表读取失败时保持现有内联数据 */ }
+
+  /* 字卡：有分表记录就以分表为准（kv 里的这三个字段只是占位） */
+  try {
+    const rec = await DB.get(STORE_CARDS, 'main');
+    if (rec && Array.isArray(rec.cards)) {
+      state.cards = rec.cards;
+      if (Array.isArray(rec.cardGroups)) state.cardGroups = rec.cardGroups;
+      if (Array.isArray(rec.userPatCards)) state.userPatCards = rec.userPatCards;
+      if (Array.isArray(rec.taPatCards)) state.taPatCards = rec.taPatCards;
+    }
+  } catch (e) { /* 忽略 */ }
+
+  /* 聊天记录：按梦角 ID 精确还原，条数完全保留 */
+  try {
+    const keys = await DB.keys(STORE_CHATS);
+    if (!keys) heavyHydrateFailed = true;
+    if (keys && keys.length) {
+      const vals = await DB.all(STORE_CHATS);
+      const map = new Map();
+      keys.forEach((k, i) => map.set(String(k), vals[i]));
+      state.roles.forEach(r => {
+        if (map.has(r.id) && Array.isArray(map.get(r.id))) state.chats[r.id] = map.get(r.id);
+      });
+    }
+  } catch (e) { /* 忽略 */ }
+
+  /* 书籍正文 */
+  try {
+    const keys = await DB.keys(STORE_BOOKS);
+    if (!keys) heavyHydrateFailed = true;
+    if (keys && keys.length) {
+      const vals = await DB.all(STORE_BOOKS);
+      const map = new Map();
+      keys.forEach((k, i) => map.set(String(k), vals[i]));
+      state.readData.books.forEach(b => {
+        const rec = map.get(b.id);
+        if (rec && Array.isArray(rec.paras) && rec.paras.length) b.paras = rec.paras;
+      });
+    }
+  } catch (e) { /* 忽略 */ }
+
+  if (assetMap.size) {
+    resolveAssetRefs(state.chats, assetMap);
+    resolveAssetRefs(state, assetMap);
+  }
+}
+
 let saveTimer = null;
+let saveChain = Promise.resolve();   /* 串行化落盘：避免两次保存同时清理图片资源导致误删 */
+
 function persist(immediate = false) {
-  const write = async () => {
-    if (!state) return;
-    const ok = await Storage.set(state);
-    if (!ok && Storage.mode !== 'memory') showToast('本地存储写入失败，可能已超出浏览器容量，请导出备份');
+  const write = () => {
+    if (!state) return Promise.resolve(false);
+    saveChain = saveChain.then(() => saveStateNow()).catch(() => false);
+    return saveChain.then(ok => {
+      if (!ok && Storage.mode !== 'memory') showToast('本地存储写入失败，请检查浏览器存储空间（建议先导出备份）');
+      return ok;
+    });
   };
   if (immediate) return write();
   clearTimeout(saveTimer);
@@ -477,10 +839,11 @@ function mergeState(saved) {
   out.readData = {
     roleId: typeof rdSrc.roleId === 'string' ? rdSrc.roleId : '',
     isReading: rdSrc.isReading === true,
-    books: Array.isArray(rdSrc.books) ? rdSrc.books.filter(b => b && b.id && Array.isArray(b.paras)).map(b => ({
+    /* 书籍正文已外置到 IndexedDB 的 books 表：这里允许只有书名/进度、没有 paras 的轻量记录 */
+    books: Array.isArray(rdSrc.books) ? rdSrc.books.filter(b => b && b.id).map(b => ({
       id: String(b.id),
       name: String(b.name || '未命名').slice(0, 60),
-      paras: b.paras.map(p => String(p == null ? '' : p)).filter(p => p.trim()),
+      paras: Array.isArray(b.paras) ? b.paras.map(p => String(p == null ? '' : p)).filter(p => p.trim()) : [],
       chars: Number(b.chars) || 0,
       ts: Number(b.ts) || Date.now()
     })) : [],
@@ -1365,23 +1728,26 @@ function readFileAsDataURL(file) {
   });
 }
 
-function compressDataURL(dataURL, maxDim = 320, quality = .82) {
+/* 统一图片压缩：最大边 800px、JPEG 质量 0.7
+   所有上传入口都走这里，避免大图把 IndexedDB 也撑爆；maxDim 超过 800 会被强制压到 800 */
+function compressDataURL(dataURL, maxDim = 800, quality = .7) {
   return new Promise(resolve => {
+    const cap = clamp(Number(maxDim) || 800, 64, 800);
+    const q = clamp(Number(quality) || .7, .3, .7);
     const img = new Image();
     img.onload = () => {
       let { width, height } = img;
-      const scale = Math.min(1, maxDim / Math.max(width, height));
+      const scale = Math.min(1, cap / Math.max(width, height));
       const w = Math.max(1, Math.round(width * scale));
       const h = Math.max(1, Math.round(height * scale));
       const canvas = document.createElement('canvas');
       canvas.width = w; canvas.height = h;
       const ctx = canvas.getContext('2d');
+      /* JPEG 不支持透明，先铺白底，避免透明区域变成黑块 */
       ctx.fillStyle = '#fff';
       ctx.fillRect(0, 0, w, h);
       ctx.drawImage(img, 0, 0, w, h);
-      let out = canvas.toDataURL('image/webp', quality);
-      if (!out.startsWith('data:image/webp')) out = canvas.toDataURL('image/jpeg', quality);
-      resolve(out);
+      resolve(canvas.toDataURL('image/jpeg', q));
     };
     img.onerror = () => resolve(dataURL);
     img.src = dataURL;
@@ -1389,7 +1755,7 @@ function compressDataURL(dataURL, maxDim = 320, quality = .82) {
 }
 
 /** 选择本地图片并压缩，返回 dataURL 或 null */
-function pickImage(maxDim = 320, quality = .82) {
+function pickImage(maxDim = 800, quality = .7) {
   return new Promise(resolve => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -1411,7 +1777,7 @@ function pickImage(maxDim = 320, quality = .82) {
 }
 
 /** 多选本地图片并逐张压缩；单张失败只提示，不影响其他图片 */
-function pickImages(maxDim = 1000, quality = .78) {
+function pickImages(maxDim = 800, quality = .7) {
   return new Promise(resolve => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -1891,7 +2257,7 @@ function renderPublishPage() {
   $('#pubAddImg').addEventListener('click', async () => {
     const remain = MAX_MOMENT_IMAGES - spaceDraftImages.length;
     if (remain <= 0) { showToast('最多上传 9 张'); return; }
-    const list = await pickImages(1000, .78);
+    const list = await pickImages(800, .7);
     if (!list.length) return;
     const room = MAX_MOMENT_IMAGES - spaceDraftImages.length;
     spaceDraftImages = spaceDraftImages.concat(list.slice(0, room));
@@ -2359,7 +2725,8 @@ function renderChatPage(roleId) {
       /* 第一次点击：先挂起定时器，250ms 内没有第二次点击才按单击处理 */
       avatarTapTimer = setTimeout(() => {
         avatarTapTimer = null;
-        showTaStatusCard(roleId);
+        /* 顶部头像：取聊天记录中最后一条 TA 消息的心声，没有则兜底随机 */
+        showTaStatusCard(roleId, heartTagsOfMessage(lastTaMessage(roleId)));
       }, 250);
     });
   }
@@ -2549,7 +2916,10 @@ function ensureChatDelegation(list) {
       }
       msgAvatarTapTimer = setTimeout(() => {
         msgAvatarTapTimer = null;
-        showTaStatusCard(roleId);
+        /* 气泡头像：直接读这条消息里存的心声（同一轮连发的多条完全一致），
+           旧数据没有该字段时兜底生成并写回这条消息 */
+        const msg = chatOf(roleId).find(x => x.id === ava.dataset.avapat);
+        showTaStatusCard(roleId, heartTagsOfMessage(msg));
       }, 250);
       return;
     }
@@ -2746,7 +3116,7 @@ function renderChatMessages() {
     html += `
       <div class="msg ${mine ? 'mine' : 'theirs'}${checked ? ' selected' : ''}" data-mid="${m.id}">
         ${chatSelectMode ? `<div class="sel-check">${checked ? '✓' : ''}</div>` : ''}
-        ${mine ? avatarHTML(state.my.avatar, 34) : `<span class="ava-pat msg-ta-avatar" data-avapat>${roleAvatarHTML(role, 34)}</span>`}
+        ${mine ? avatarHTML(state.my.avatar, 34) : `<span class="ava-pat msg-ta-avatar" data-avapat="${m.id}">${roleAvatarHTML(role, 34)}</span>`}
         <div class="msg-body">
           ${inner}
           <div class="msg-time">${fmtClock(m.ts)}${readMark}</div>
@@ -2976,7 +3346,7 @@ function pickChatImages(roleId, capture) {
     for (const file of files) {
       if (!/^image\//.test(file.type)) { showToast('已跳过非图片文件'); continue; }
       try {
-        out.push(await compressDataURL(await readFileAsDataURL(file), 1280, .75));
+        out.push(await compressDataURL(await readFileAsDataURL(file), 800, .7));
       } catch (e) {
         showToast('有一张图片读取失败，已跳过');
       }
@@ -3327,6 +3697,11 @@ function sendTaBurst(roleId, opts) {
   if (!roleById(roleId)) return;
   const options = opts || {};
   const gen = options.gen != null ? options.gen : (chatGenMap.get(roleId) || 0);
+  /* 心声：整轮连发只在开始处抽取一次，本轮所有消息共用同一组 heartTags；
+     调用方也可以传入已抽好的 options.heartTags，让更早的引导消息与本轮保持一致 */
+  const roundTags = (Array.isArray(options.heartTags) && options.heartTags.length)
+    ? options.heartTags
+    : makeHeartTags();
   /* single:true 固定只发 1 条（问卷回答等场景），不参与连发条数 */
   const total = options.single ? 1 : burstCount();
   let i = 0;
@@ -3356,7 +3731,7 @@ function sendTaBurst(roleId, opts) {
         : '';
       if (!text && i === 0 && options.fallback) text = String(options.fallback);
       if (text) {
-        const payload = { type: 'text', content: text };
+        const payload = { type: 'text', content: text, heartTags: roundTags };
         if (i === 0 && options.quote) payload.quote = options.quote;
         pushDreamMessage(roleId, payload);
         lastText = text;
@@ -3463,7 +3838,7 @@ function taSendStickerReply(roleId, gen) {
     const now = (state.stickers || []).filter(s => s && s.data);
     if (!now.length) { taReplyWithCards(roleId, gen); return; }
     const sticker = pickOne(now);
-    const payload = { type: 'sticker', image: sticker.data, content: '[表情]' };
+    const payload = { type: 'sticker', image: sticker.data, content: '[表情]', heartTags: makeHeartTags() };
     if (quote) payload.quote = quote;
     pushDreamMessage(roleId, payload);
     finishReplyStep(roleId);
@@ -5883,7 +6258,7 @@ function openPhotoWallActions(i) {
     {
       label: '更换这张图片',
       onClick: async () => {
-        const url = await pickImage(720, .8);
+        const url = await pickImage(800, .7);
         if (!url) return;
         state.photoWall.images[i] = url;
         persist(true);
@@ -5921,7 +6296,7 @@ async function photoWallAddFiles(files) {
   for (const file of list.slice(0, room)) {
     try {
       const raw = await readFileAsDataURL(file);
-      state.photoWall.images.push(await compressDataURL(raw, 720, .8));
+      state.photoWall.images.push(await compressDataURL(raw, 800, .7));
       added++;
     } catch (e) { /* 单张失败跳过 */ }
   }
@@ -6289,7 +6664,7 @@ function petHideBubble() {
 }
 
 /* ---------------- 图片上传（GIF 原样保留，静态图压透明背景） ---------------- */
-function compressPetImage(dataURL, maxDim = 600) {
+function compressPetImage(dataURL, maxDim = 800) {
   return new Promise(resolve => {
     const img = new Image();
     img.onload = () => {
@@ -6334,7 +6709,7 @@ function pickPetImage() {
         const raw = await readFileAsDataURL(file);
         /* GIF 必须原样保存，走 canvas 压缩会丢动画 */
         if (isGif) return resolve(raw);
-        resolve(await compressPetImage(raw, 600));
+        resolve(await compressPetImage(raw, 800));
       } catch (e) { resolve(null); }
     });
     input.click();
@@ -6642,7 +7017,7 @@ function renderBeautifyPage() {
         const img = new Image();
         img.onload = () => {
           try {
-            const max = 1400;
+            const max = 800;
             let w = img.width, h = img.height;
             if (w > max || h > max) {
               const ratio = Math.min(max / w, max / h);
@@ -6651,8 +7026,8 @@ function renderBeautifyPage() {
             const canvas = document.createElement('canvas');
             canvas.width = w; canvas.height = h;
             canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-            const data = canvas.toDataURL('image/jpeg', .72);
-            if (data.length > 1800000) { showToast('图片过大，换一张试试'); cleanup(); return; }
+            const data = canvas.toDataURL('image/jpeg', .7);
+            if (data.length > 900000) { showToast('图片过大，换一张试试'); cleanup(); return; }
             setWallValue(key, data);
             showToast('壁纸已更新');
           } catch (e) {
@@ -7236,11 +7611,14 @@ function enterLedgerInput(roleId, type) {
           state.ledger.unshift(rec);
           persist();
           const reply = `已帮你记下：${income ? '收入 +' : '支出 -'} ${parsed.item} ${parsed.amount.toFixed(2)} 元`;
-          pushDreamMessage(roleId, { type: 'text', content: reply });
+          /* 记账回执 + 后面的字卡回复属于同一轮：共享同一组心声 */
+          const ledgerTags = makeHeartTags();
+          pushDreamMessage(roleId, { type: 'text', content: reply, heartTags: ledgerTags });
           /* 稍后追加字卡回复（按连发规则，每条独立延迟与正在输入） */
           setTimeout(() => {
             if (!roleById(roleId)) return;
             sendTaBurst(roleId, {
+              heartTags: ledgerTags,
               makeText: prev => composeUniqueReply(roleId, prev),
               fallback: income ? '进账啦，辛苦啦' : '记下啦，别乱花钱哦'
             });
@@ -8328,10 +8706,12 @@ function taSendGift(roleId) {
   state.giftHistory.unshift(rec);
   if (state.giftHistory.length > 300) state.giftHistory.length = 300;
   persist();
+  /* 礼物 + 两句话属于同一轮连发：心声只抽一次，三条消息共用 */
+  const giftTags = makeHeartTags();
   /* 第一张：礼物卡片（名称 + Emoji），样式与普通礼物完全一致 */
   pushDreamMessage(roleId, {
     sender: 'ta', type: 'gift', giftRecordId: rec.id, giftName,
-    emoji, price, note: '', direction: 'in', claimed: false
+    emoji, price, note: '', direction: 'in', claimed: false, heartTags: giftTags
   });
   showToast(taName(role.id) + ' 送了你一份礼物');
   if (currentRoute.page === 'sub' && currentRoute.name === 'gifts') renderGiftPage();
@@ -8342,13 +8722,13 @@ function taSendGift(roleId) {
     : pickOne(['路过看到，觉得很适合你。', '知道你喜欢这个，就买啦。']);
   setTimeout(() => {
     if (!roleById(roleId)) return;
-    pushDreamMessage(roleId, { sender: 'ta', type: 'text', content: secondLine });
+    pushDreamMessage(roleId, { sender: 'ta', type: 'text', content: secondLine, heartTags: giftTags });
 
     /* 第三条：约 1 秒后，从主字卡库随机抽一句感谢语 */
     setTimeout(() => {
       if (!roleById(roleId)) return;
       const thanks = composeUniqueReply(roleId, '') || '谢谢你收下。';
-      pushDreamMessage(roleId, { sender: 'ta', type: 'text', content: thanks });
+      pushDreamMessage(roleId, { sender: 'ta', type: 'text', content: thanks, heartTags: giftTags });
     }, 1000);
   }, 400);
 }
@@ -9826,6 +10206,11 @@ function downloadJSON(data, filename) {
  * ========================================================= */
 let cardFilterGroup = 'all'; // 'all' | ''(未分组) | groupId
 let cardSearch = '';
+/* 字卡库性能参数：首屏只渲染 100 张，其余用「加载更多」追加；
+   渲染走 setTimeout 延迟，先出页面框架再插 DOM，避免进入页面时白屏卡顿 */
+const CARD_PAGE_SIZE = 100;
+let cardRenderLimit = CARD_PAGE_SIZE;
+let cardRenderTimer = null;
 
 function cardGroupById(id) {
   return state.cardGroups.find(g => g.id === id) || null;
@@ -9906,17 +10291,31 @@ async function deleteCardGroup(id) {
 }
 
 function renderCardsPage() {
-  const enabled = state.cards.filter(c => c.enabled !== false).length;
-  const noneCount = state.cards.filter(c => !c.groupId || !cardGroupById(c.groupId)).length;
-  if (cardFilterGroup !== 'all' && cardFilterGroup !== '' && !cardGroupById(cardFilterGroup)) {
+  /* 一次性统计：总数 / 启用 / 未分组 / 各分组。
+     原来每个分组都要 filter 一遍全库，字卡上千 + 分组几十时会明显卡顿 */
+  const groupMap = new Map(state.cardGroups.map(g => [g.id, g]));
+  const groupCounts = new Map();
+  let enabled = 0;
+  let noneCount = 0;
+  for (const c of state.cards) {
+    if (c.enabled !== false) enabled++;
+    if (c.groupId && groupMap.has(c.groupId)) {
+      groupCounts.set(c.groupId, (groupCounts.get(c.groupId) || 0) + 1);
+    } else {
+      noneCount++;
+    }
+  }
+  if (cardFilterGroup !== 'all' && cardFilterGroup !== '' && !groupMap.has(cardFilterGroup)) {
     cardFilterGroup = 'all';
   }
+  /* 每次进入页面都从首屏上限重新渲染 */
+  cardRenderLimit = CARD_PAGE_SIZE;
 
   const tabsHTML = [
     `<button class="group-tab ${cardFilterGroup === 'all' ? 'active' : ''}" data-gfilter="all">全部<span class="cnt">${state.cards.length}</span></button>`,
     `<button class="group-tab ${cardFilterGroup === '' ? 'active' : ''}" data-gfilter="">未分组<span class="cnt">${noneCount}</span></button>`,
     ...state.cardGroups.map(g =>
-      `<button class="group-tab ${cardFilterGroup === g.id ? 'active' : ''}" data-gfilter="${g.id}">${esc(g.name)}<span class="cnt">${state.cards.filter(c => c.groupId === g.id).length}</span></button>`),
+      `<button class="group-tab ${cardFilterGroup === g.id ? 'active' : ''}" data-gfilter="${g.id}">${esc(g.name)}<span class="cnt">${groupCounts.get(g.id) || 0}</span></button>`),
     `<button class="group-tab group-new" id="groupNew">＋ 新建分组</button>`
   ].join('');
   const activeGroup = (cardFilterGroup !== 'all' && cardFilterGroup !== '') ? cardGroupById(cardFilterGroup) : null;
@@ -9924,7 +10323,7 @@ function renderCardsPage() {
   const body = subShell('字卡库', `
     <div class="top-stat">
       <span>总数 <b>${state.cards.length}</b></span>
-      <span>启用 <b>${enabled}</b></span>
+      <span>启用 <b id="cardEnabledStat">${enabled}</b></span>
       <span>分组 <b>${state.cardGroups.length}</b></span>
     </div>
     <div class="panel">
@@ -9948,11 +10347,20 @@ function renderCardsPage() {
     </div>
     <div id="cardList"></div>`);
 
-  $('#cardSearch').addEventListener('input', e => { cardSearch = e.target.value; renderCardList(); });
-  $$('[data-gfilter]').forEach(btn => btn.addEventListener('click', () => {
+  /* 搜索：60ms 防抖，避免每敲一个字就把整库过滤 + 重建 DOM */
+  $('#cardSearch').addEventListener('input', e => {
+    cardSearch = e.target.value;
+    cardRenderLimit = CARD_PAGE_SIZE;
+    scheduleCardList(60);
+  });
+  /* 分组标签：在容器上一次性委托，不再为每个分组按钮单独绑定 */
+  const groupTabs = $('.group-tabs', body);
+  if (groupTabs) groupTabs.addEventListener('click', e => {
+    const btn = e.target.closest('[data-gfilter]');
+    if (!btn) return;
     cardFilterGroup = btn.dataset.gfilter;
     renderCardsPage();
-  }));
+  });
   $('#groupNew').addEventListener('click', async () => {
     const name = await promptDialog('新建分组', '输入分组名称');
     if (name === null) return;
@@ -9977,65 +10385,110 @@ function renderCardsPage() {
     renderCardsPage();
     showToast('已清空全部字卡');
   });
-  renderCardList();
+  bindCardListEvents();
+  /* 页面框架先出现，50ms 后再插入字卡 DOM：进入页面不再被上千张字卡阻塞 */
+  scheduleCardList(50);
 }
 
 function renderCardList() {
   const box = $('#cardList');
   if (!box) return;
   const q = cardSearch.trim().toLowerCase();
-  const list = state.cards
-    .filter(c => !q || c.content.toLowerCase().includes(q) || cardGroupNameOf(c).toLowerCase().includes(q))
-    .filter(c => cardFilterGroup === 'all' ? true
-      : cardFilterGroup === '' ? (!c.groupId || !cardGroupById(c.groupId))
-      : c.groupId === cardFilterGroup)
-    .slice()
-    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  /* 分组名一次建表，避免每张卡都去 state.cardGroups.find 一遍 */
+  const groupNames = new Map(state.cardGroups.map(g => [g.id, g.name || '未分组']));
+  const groupNameOf = c => (c.groupId && groupNames.has(c.groupId)) ? groupNames.get(c.groupId) : '未分组';
+
+  const list = state.cards.filter(c => {
+    if (cardFilterGroup !== 'all') {
+      if (cardFilterGroup === '') {
+        if (c.groupId && groupNames.has(c.groupId)) return false;
+      } else if (c.groupId !== cardFilterGroup) return false;
+    }
+    if (!q) return true;
+    const text = String(c.content || '').toLowerCase();
+    return text.includes(q) || groupNameOf(c).toLowerCase().includes(q);
+  }).sort((a, b) => (b.ts || 0) - (a.ts || 0));
 
   if (!list.length) {
     box.innerHTML = '<div class="empty">没有符合条件的字卡<br>新增或导入一些吧</div>';
     return;
   }
 
-  box.innerHTML = list.map(c => `
-    <div class="card-item ${c.enabled === false ? 'disabled' : ''}">
-      <div style="margin-bottom:2px">
-        <span class="chip">${esc(cardGroupNameOf(c))}</span>
-      </div>
+  /* 只渲染前 cardRenderLimit 张：卡片 DOM 保持扁平（去掉多余包裹层） */
+  const shown = list.slice(0, cardRenderLimit);
+  let html = shown.map(c => `
+    <div class="card-item${c.enabled === false ? ' disabled' : ''}">
+      <span class="chip card-tag">${esc(groupNameOf(c))}</span>
       <div class="card-text">${esc(c.content)}</div>
       <div class="card-ops">
-        <label class="switch"><input type="checkbox" data-toggle="${c.id}" ${c.enabled !== false ? 'checked' : ''}><span class="slider"></span></label>
+        <label class="switch"><input type="checkbox" data-toggle="${c.id}"${c.enabled !== false ? ' checked' : ''}><span class="slider"></span></label>
         <span class="muted">启用</span>
         <span class="spacer"></span>
         <button class="btn-sm" data-edit="${c.id}">编辑</button>
         <button class="btn-sm" data-del="${c.id}">删除</button>
       </div>
     </div>`).join('');
+  const rest = list.length - shown.length;
+  if (rest > 0) {
+    html += `<button class="btn block card-more" id="cardMoreBtn" type="button">加载更多（还有 ${rest} 张）</button>`;
+  }
+  box.innerHTML = html;
+}
 
-  $$('[data-toggle]', box).forEach(input => {
-    input.addEventListener('change', () => {
-      const card = state.cards.find(c => c.id === input.dataset.toggle);
-      if (!card) return;
-      card.enabled = input.checked;
-      persist();
+/* 列表事件委托：只在 #cardList 上绑一次 click / change，
+   几百上千张字卡也只有两个监听器，不会再为每张卡片单独 addEventListener */
+function bindCardListEvents() {
+  const box = $('#cardList');
+  if (!box) return;
+  box.addEventListener('click', e => {
+    const more = e.target.closest('#cardMoreBtn');
+    if (more) {
+      cardRenderLimit += CARD_PAGE_SIZE;
       renderCardList();
-    });
+      return;
+    }
+    const editBtn = e.target.closest('[data-edit]');
+    if (editBtn) { openCardEditor(editBtn.dataset.edit); return; }
+    const delBtn = e.target.closest('[data-del]');
+    if (delBtn) { deleteCardById(delBtn.dataset.del); return; }
   });
-  $$('[data-edit]', box).forEach(btn => {
-    btn.addEventListener('click', () => openCardEditor(btn.dataset.edit));
+  /* change 会冒泡，开关同样只绑这一次 */
+  box.addEventListener('change', e => {
+    const input = e.target.closest('[data-toggle]');
+    if (!input) return;
+    const card = state.cards.find(c => c.id === input.dataset.toggle);
+    if (!card) return;
+    card.enabled = input.checked;
+    /* 原地更新这一张卡，不再重建整个列表 */
+    const item = input.closest('.card-item');
+    if (item) item.classList.toggle('disabled', !input.checked);
+    const stat = $('#cardEnabledStat');
+    if (stat) stat.textContent = state.cards.filter(c => c.enabled !== false).length;
+    persist();
   });
-  $$('[data-del]', box).forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const card = state.cards.find(c => c.id === btn.dataset.del);
-      if (!card) return;
-      const ok = await confirmDialog('删除字卡', '确定删除这张字卡吗？', '删除', true);
-      if (!ok) return;
-      state.cards = state.cards.filter(c => c.id !== card.id);
-      persist();
-      renderCardsPage();
-      showToast('已删除');
-    });
-  });
+}
+
+/* 删除确认抽成独立函数，避免每张字卡各生成一个闭包 */
+async function deleteCardById(cardId) {
+  const card = state.cards.find(c => c.id === cardId);
+  if (!card) return;
+  const ok = await confirmDialog('删除字卡', '确定删除这张字卡吗？', '删除', true);
+  if (!ok) return;
+  state.cards = state.cards.filter(c => c.id !== card.id);
+  persist();
+  renderCardsPage();
+  showToast('已删除');
+}
+
+/* 异步渲染入口：先让页面框架出现，再插字卡 DOM；
+   离开字卡库后 #cardList 不存在，直接放弃这次渲染 */
+function scheduleCardList(delay = 50) {
+  clearTimeout(cardRenderTimer);
+  cardRenderTimer = setTimeout(() => {
+    cardRenderTimer = null;
+    if (!$('#cardList')) return;
+    renderCardList();
+  }, delay);
 }
 
 function openCardEditor(cardId) {
@@ -10513,10 +10966,11 @@ async function saveStickerBatch(added) {
   try {
     let ok = true;
     if (Storage.mode === 'local') {
-      /* localStorage 模式：同步写入，QuotaExceededError 可以被 try-catch 精准捕获 */
+      /* localStorage 兜底模式：同步写入，QuotaExceededError 可以被 try-catch 精准捕获 */
       localStorage.setItem(STATE_KEY, JSON.stringify(state));
     } else {
-      ok = await Storage.set(state);
+      /* IndexedDB 模式：走统一的分表落盘（图片写入 assets 表），返回失败则回滚 */
+      ok = await persist(true);
     }
     if (!ok) throw new Error('storage-write-failed');
     return true;
@@ -12712,6 +13166,14 @@ function renderStoragePage() {
       <div class="stat-cell"><div class="num">${walletTransactions().length}</div><div class="lbl">钱包交易笔数</div></div>
     </div>
     <div class="panel">
+      <div class="panel-title">存储体检</div>
+      <div class="storage-usage-line" id="storageUsageLine">正在统计…</div>
+      <div class="sb-list" id="storageBreakdown"></div>
+      <div class="tip-box" style="margin-top:10px">
+        聊天记录、字卡、书籍正文与图片已拆分存入 IndexedDB，不再受 localStorage 5MB 限制；聊天记录全量保存，永不截断。
+      </div>
+    </div>
+    <div class="panel">
       <div class="panel-title">数据管理</div>
       <div class="btn-row">
         <button class="btn primary" id="exportAll" style="flex:1">⬇ 导出全部备份</button>
@@ -12723,17 +13185,84 @@ function renderStoragePage() {
       </div>
     </div>`);
 
+  /* 真实占用：优先用浏览器给出的 usage / quota（IndexedDB 与 CacheStorage 都计入其中） */
   const bytes = new Blob([JSON.stringify(state)]).size;
   const el = $('#usageVal');
+  const line = $('#storageUsageLine');
+  const modeText = Storage.mode === 'idb' ? 'IndexedDB 分表' : Storage.mode === 'local' ? 'localStorage（兜底）' : '仅内存';
   if (navigator.storage && navigator.storage.estimate) {
     navigator.storage.estimate().then(est => {
-      if (el) el.textContent = fmtBytes(est.usage || bytes);
+      const used = Number(est.usage) || bytes;
+      const quota = Number(est.quota) || 0;
+      if (el) el.textContent = fmtBytes(used);
       const note = $('#usageNote');
-      if (note) note.textContent += ` · 数据约 ${fmtBytes(bytes)}`;
-    }).catch(() => { if (el) el.textContent = fmtBytes(bytes); });
-  } else if (el) {
-    el.textContent = fmtBytes(bytes);
+      if (note) note.textContent = '存储模式：' + modeText + ' · 数据约 ' + fmtBytes(bytes);
+      if (line) {
+        line.textContent = '浏览器已用 ' + fmtBytes(used)
+          + (quota ? ' / 配额 ' + fmtBytes(quota) + '（' + Math.min(100, Math.round(used / quota * 100)) + '%）' : '');
+      }
+    }).catch(() => {
+      if (el) el.textContent = fmtBytes(bytes);
+      if (line) line.textContent = '浏览器已用 ' + fmtBytes(bytes);
+    });
+  } else {
+    if (el) el.textContent = fmtBytes(bytes);
+    if (line) line.textContent = '浏览器已用 ' + fmtBytes(bytes);
   }
+
+  /* ---------- 存储体检：分类统计各自占用，从大到小排序 ---------- */
+  const jsonBytes = v => { try { return new Blob([JSON.stringify(v)]).size; } catch (e) { return 0; } };
+  const renderBreakdown = () => {
+    const box = $('#storageBreakdown');
+    if (!box) return;
+    const chatsBytes = state.roles.reduce((n, r) => n + jsonBytes(state.chats[r.id] || []), 0);
+    const booksBytes = state.readData.books.reduce((n, b) => n + jsonBytes(b.paras || []), 0);
+    const stickersBytes = jsonBytes(state.stickers || []);
+    const cardsBytes = jsonBytes({ c: state.cards, g: state.cardGroups, p: [state.userPatCards, state.taPatCards] });
+    const imgBytes = jsonBytes([
+      state.beautify, state.photoWall, state.pet, state.couple,
+      state.moments.map(m => m.images || []), state.music,
+      state.readData.chat, state.snapshots, state.roles.map(r => r.avatar)
+    ]);
+    const total = jsonBytes(state);
+    const other = Math.max(0, total - chatsBytes - booksBytes - stickersBytes - cardsBytes - imgBytes);
+    const rows = [
+      ['聊天记录', chatsBytes],
+      ['一起读书 · 书籍正文', booksBytes],
+      ['表情包', stickersBytes],
+      ['字卡库', cardsBytes],
+      ['图片资源（头像 / 壁纸 / 动态图）', imgBytes],
+      ['其它设置与记录', other]
+    ].sort((a, b) => b[1] - a[1]);
+    const max = Math.max(1, ...rows.map(r => r[1]));
+    let html = rows.map(([name, size]) => `
+      <div class="sb-row">
+        <div class="sb-top"><span class="sb-name">${esc(name)}</span><span class="sb-size">${fmtBytes(size)}</span></div>
+        <div class="sb-bar"><i style="width:${Math.max(2, Math.round(size / max * 100))}%"></i></div>
+      </div>`).join('');
+
+    /* localStorage 逐键统计：迁移完成后通常为空，这里让用户一眼看清有没有旧残留 */
+    const localRows = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k) continue;
+        localRows.push([k, new Blob([localStorage.getItem(k) || '']).size]);
+      }
+    } catch (e) { /* 隐私模式可能不可用，忽略 */ }
+    localRows.sort((a, b) => b[1] - a[1]);
+    html += `<div class="sb-section">localStorage 键值（旧版残留）</div>`;
+    if (localRows.length) {
+      html += localRows.map(([k, size]) => `
+        <div class="sb-row">
+          <div class="sb-top"><span class="sb-name">${esc(k)}</span><span class="sb-size">${fmtBytes(size)}</span></div>
+        </div>`).join('');
+    } else {
+      html += `<div class="sb-empty">无残留，已全部迁移到 IndexedDB</div>`;
+    }
+    box.innerHTML = html;
+  };
+  requestAnimationFrame(renderBreakdown);
 
   $('#exportAll').addEventListener('click', () => {
     downloadJSON(state, `梦之信使备份-${todayKey()}.json`);
@@ -12771,7 +13300,7 @@ function renderStoragePage() {
   $('#clearAll').addEventListener('click', clearAllData);
 }
 
-function applyImportedState(data) {
+async function applyImportedState(data) {
   state = mergeState(data);
   typingMap.clear();
   replyQueue.clear();
@@ -12793,6 +13322,13 @@ function applyImportedState(data) {
   musicReleaseAll();
   musicTracksInit();
   applyTheme();
+  /* 导入会整体替换数据：先清掉旧的分表记录，避免旧聊天 / 旧书籍残留占用空间 */
+  if (Storage.mode === 'idb') {
+    await Promise.all([DB.clear(STORE_CHATS), DB.clear(STORE_BOOKS), DB.clear(STORE_CARDS), DB.clear(STORE_ASSETS)]);
+    assetMemo.clear();
+    assetById.clear();
+    assetWritten.clear();
+  }
   persist(true);
   routeStack = [];
   currentRoute = { page: 'home' };
@@ -12831,6 +13367,13 @@ async function clearAllData() {
   replyQueue.clear();
   replyBusy.clear();
   chatGenMap.clear();
+  /* 清空 IndexedDB 分表：聊天 / 书籍 / 字卡 / 图片资源，彻底释放空间 */
+  if (Storage.mode === 'idb') {
+    await Promise.all([DB.clear(STORE_CHATS), DB.clear(STORE_BOOKS), DB.clear(STORE_CARDS), DB.clear(STORE_ASSETS)]);
+    assetMemo.clear();
+    assetById.clear();
+    assetWritten.clear();
+  }
   state = defaultState();
   applyTheme();
   persist(true);
@@ -13750,6 +14293,8 @@ async function deleteRole(roleId, closeFn) {
   }
   persist(true);
   if (typeof closeFn === 'function') closeFn();
+  /* 分表里该梦角的聊天记录同步删除，避免占用空间 */
+  if (Storage.mode === 'idb') DB.del(STORE_CHATS, roleId);
 
   if (currentRoute.page === 'chat' && currentRoute.roleId === roleId) {
     routeStack = [];
@@ -13800,6 +14345,7 @@ let readingDragState = null;      /* 悬浮窗拖拽状态 */
 let readingRingRange = 'day';     /* 环形统计范围：day / week / all（全部 = 累加所有历史记录） */
 let readingQuoteTimer = null;     /* 松手后的 150ms 延时，等浏览器把选区稳定下来 */
 let rdLastEmotionTapAt = 0;       /* 触屏 touchend 已处理过的标记，防止 click 再触发一次 */
+const rdParasTried = new Set();   /* 已尝试从 books 表补读正文的书籍 ID，避免重复补读 */
 
 function rdDateKey(d) {
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
@@ -14104,7 +14650,8 @@ function rdUploadBook() {
       state.readData.bookId = book.id;
       state.readData.readPos = 0;
       state.readData.chapter = 0;
-      persist();
+      rdParasTried.add(book.id);
+      persist(true);   /* 正文较大：立即写入 books 表，不等防抖 */
       showToast('已加入书架：' + book.name);
       applyRoute();
     };
@@ -14309,6 +14856,11 @@ function rdDeleteBook(bookId) {
     d.chapter = 0;
   }
   persist();
+  /* 分表里这本书的正文同步删除，避免占用空间 */
+  if (Storage.mode === 'idb') {
+    DB.del(STORE_BOOKS, bookId);
+    rdParasTried.delete(bookId);
+  }
   showToast('已移除《' + name + '》');
   applyRoute();   /* 重新渲染书架；没有书时自动回到空状态提示 */
 }
@@ -14327,6 +14879,17 @@ function renderReadingRoomPage() {
   const d = state.readData;
   const book = d.books.find(b => b.id === d.bookId) || d.books[0] || null;
   if (book && d.bookId !== book.id) { d.bookId = book.id; persist(); }
+  /* 正文只存在 books 表：若本次没有读到（首次升级或瞬时失败），补读一次再渲染 */
+  if (book && (!book.paras || !book.paras.length) && Storage.mode === 'idb' && !rdParasTried.has(book.id)) {
+    rdParasTried.add(book.id);
+    DB.get(STORE_BOOKS, book.id).then(rec => {
+      if (rec && Array.isArray(rec.paras) && rec.paras.length) {
+        book.paras = rec.paras;
+        rdChapterCache = { bookId: '', len: -1, chapters: [] };
+        if (currentRoute.page === 'sub' && currentRoute.name === 'readingroom') applyRoute();
+      }
+    });
+  }
   const role = roleById(rdCurrentRoleId());
   /* 章节化渲染：无论书多大，页面只挂当前一章，避免整本 join 造成滚动/重排卡顿 */
   const chapters = book ? rdChaptersOf(book) : [''];
@@ -15219,6 +15782,38 @@ const emotionCategories = {
   }
 };
 
+/* 生成一组心声标签：随机取 3 个不同情绪大类，各抽 1 个词，
+ * 同时把该分类的文字色 / 背景色一起存下来（纯数据，可直接写进消息对象）
+ * 一轮连发只调用一次，整轮消息共用同一组 */
+function makeHeartTags(n = 3) {
+  const allKeys = Object.keys(emotionCategories);
+  const keys = pickMany(allKeys, Math.min(n, allKeys.length));
+  return keys.map(key => {
+    const cat = emotionCategories[key];
+    return { word: pickOne(cat.words || []), color: cat.color, bg: cat.bg };
+  });
+}
+
+/* 读取某条 TA 消息的心声；旧数据没有 heartTags 时兜底生成一组并写回消息，
+ * 这样同一条消息再次点击看到的还是同一组，不会每点一次就换 */
+function heartTagsOfMessage(msg) {
+  if (!msg) return null;
+  if (Array.isArray(msg.heartTags) && msg.heartTags.length) return msg.heartTags;
+  msg.heartTags = makeHeartTags();
+  persist();
+  return msg.heartTags;
+}
+
+/* 聊天记录里最后一条 TA 消息（跳过已撤回的，气泡已不可见） */
+function lastTaMessage(roleId) {
+  const list = chatOf(roleId);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (m && m.role === 'dream' && !m.recalled) return m;
+  }
+  return null;
+}
+
 /* 头像来源：梦角资料里的 avatar 可能是 Base64 / 图片链接，也可能只是 Emoji；
  * 统一转成 <img> 可用的 src（Emoji 用 SVG 包一层，避免空 src 出现裂图） */
 function taStatusAvatarSrc(role) {
@@ -15230,9 +15825,9 @@ function taStatusAvatarSrc(role) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-/* 打开卡片：打乱全部情绪大类后取前 3 个（三个词绝不同组），
- * 每个分类各抽 1 个词，分别注入该分类的文字色 / 背景色 */
-function showTaStatusCard(roleId) {
+/* 打开卡片：优先使用传入的 heartTags（同一条 / 同一轮消息共用）；
+ * 没传（旧数据 / 空记录）时兜底随机生成一组 */
+function showTaStatusCard(roleId, tags) {
   const card = $('#ta-status-card');
   if (!card) return;
   /* 头像取自当前梦角资料 */
@@ -15243,14 +15838,12 @@ function showTaStatusCard(roleId) {
     avaImg.onerror = () => { avaImg.onerror = null; avaImg.src = taStatusAvatarSrc(null); };
     avaImg.src = taStatusAvatarSrc(role);
   }
-  const allKeys = Object.keys(emotionCategories);
-  const keys = pickMany(allKeys, Math.min(3, allKeys.length));
+  const list = (Array.isArray(tags) && tags.length) ? tags : makeHeartTags(3);
   const box = $('#status-tags-container');
   if (box) {
-    box.innerHTML = keys.map(key => {
-      const cat = emotionCategories[key];
-      const word = pickOne(cat.words || []);
-      return `<span class="status-capsule" style="color:${cat.color};background:${cat.bg};">${esc(word)}</span>`;
+    box.innerHTML = list.map(tag => {
+      const t = tag || {};
+      return `<span class="status-capsule" style="color:${esc(t.color || '#12b7f5')};background:${esc(t.bg || 'rgba(18,183,245,.12)')};">${esc(t.word || '')}</span>`;
     }).join('');
   }
   card.style.display = 'block';
@@ -15347,6 +15940,9 @@ async function boot() {
   }
 
   state = mergeState(saved);
+  /* 分表还原：聊天记录 / 字卡 / 书籍正文 / 图片资源全部来自 IndexedDB；
+     kv 里只有轻量状态，所以这里补回完整数据后才允许渲染与落盘 */
+  await hydrateHeavyData();
   rdSyncGlobals();      /* 一起读书：把持久化的共读状态同步到运行时全局变量 */
   musicTracksInit();    /* 一起听：还原歌单元数据（音频 Blob 不持久化） */
   musicBindInputs();    /* 绑定 index.html 中的隐藏音频 / 图片选择器 */
@@ -15425,6 +16021,32 @@ async function boot() {
   window.forceAutoLetter = () => checkAutoLetters(true);
   window.rdForceAutoLetter = window.forceAutoLetter;
 }
+
+/* ===================== 开屏加载动画时序（Splash Screen） ===================== */
+/* 遮罩与字母跳动由 HTML + CSS 在首帧自行开始，脚本只负责后续三段时序：
+ *   1.5s：Loading 淡出，Logo / 拉丁文 / 中文上浮浮现
+ *   3.5s：整块遮罩淡出（CSS transition 0.6s）
+ *   4.1s：display:none，彻底露出主界面
+ * 时序与数据初始化（boot）并行，任何一步异常都不会让遮罩卡死。 */
+function runSplash() {
+  const screen = $('#splash-screen');
+  if (!screen) return;
+  const content = $('#splash-content');
+  const loading = $('#splash-loading');
+
+  setTimeout(() => {
+    if (loading) loading.classList.add('splash-out');   /* 加载文字淡出 */
+    if (content) content.classList.add('show');         /* 浮现区上浮显现 */
+  }, 1500);
+
+  setTimeout(() => {
+    screen.classList.add('splash-fade');                /* 整个遮罩淡出 */
+    setTimeout(() => { screen.style.display = 'none'; }, 600);
+  }, 3500);
+}
+
+/* 立即启动开屏动画；defer 加载保证此时 DOM 已就绪 */
+runSplash();
 
 /* 页面加载完成即启动：DOMContentLoaded 后立刻补查一次主动来信等任务，刷新不丢 */
 if (document.readyState === 'loading') {

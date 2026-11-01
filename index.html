@@ -15,6 +15,20 @@
 
 </head>
 <body>
+<!-- 开屏加载动画：白底全屏遮罩，首屏即显示；时序（1.5s 浮现 / 3.5s 淡出 / 4.1s 移除）由 app.js 的 runSplash() 控制 -->
+<div id="splash-screen">
+  <!-- 浮现区（初始隐藏，整体居中）：Logo + 拉丁文 + 中文标题 -->
+  <div id="splash-content" class="splash-hidden">
+    <img src="logo.jpg" alt="梦之信使" class="splash-logo">
+    <div class="splash-title-en">Nuntia Somniorum</div>
+    <div class="splash-title-cn">梦之信使·字卡传讯</div>
+  </div>
+
+  <!-- 加载文字区：字母依次上下跳动 -->
+  <div id="splash-loading">
+    <span>L</span><span>o</span><span>a</span><span>d</span><span>i</span><span>n</span><span>g</span><span>.</span><span>.</span><span>.</span>
+  </div>
+</div>
 <!-- 离线消息补发提示横幅：默认隐藏，由 app.js 的 checkOfflineEvents() 填入纯文本并滑入 -->
 <div id="welcome-banner" class="welcome-banner" style="display: none;"></div>
 <!-- 单击 TA 头像（顶部或气泡旁）弹出的「心声胶囊」卡片：标题 + 分割线 + 头像 + 横向胶囊 -->
