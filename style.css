@@ -3285,3 +3285,172 @@ canvas.gmk{display:block;width:100%;aspect-ratio:1/1;touch-action:manipulation;c
 .cs-apply-status.error{color:#FF3B30;font-weight:600;}
 .cs-apply-status.warn{color:#f59e0b;font-weight:600;}
 .cs-apply-status.info{color:#8E8E93;}
+/* ===================== 系统浮层防污染护盾 =====================
+ * 用户自定义样式已在 app.js 注入时统一锁进 #page-chat 作用域（csScopeToChat），
+ * 这里是双保险：即使将来出现漏网选择器，Toast 与来电弹窗也保持系统样式。
+ * 注意：不能用 all:initial —— 它会清掉 position:fixed、transform 与过渡动画，直接毁掉布局；
+ *       只针对最容易被气泡代码误伤的盒模型属性做 !important 重置。 */
+.toast{
+  background:rgba(24,30,40,.88) !important;
+  color:#fff !important;
+  border:none !important;
+  border-radius:20px !important;
+  box-shadow:none !important;
+  padding:9px 16px !important;
+  font-size:13px !important;
+  max-width:80vw !important;
+}
+.call-screen{
+  background:#101a2b !important;
+  color:#fff !important;
+  border:none !important;
+  border-radius:0 !important;
+  box-shadow:none !important;
+}
+.call-inner,
+.call-tools{
+  background:transparent !important;
+  border:none !important;
+  border-radius:0 !important;
+  box-shadow:none !important;
+}
+
+/* ===================== 拾光瓶（二级页：顶部面板 + 中央瓶 + 底部进度） ===================== */
+/* 页面布局：上中下三段，space-evenly 分布填补空白 */
+.jar-page{
+  min-height:100%;display:flex;flex-direction:column;
+  align-items:stretch;justify-content:space-evenly;gap:14px;
+  padding:8px 2px 18px;
+}
+/* 顶部：数据与鼓励面板 */
+.jar-panel{
+  background:#fff;border:.5px solid rgba(60,60,67,.08);border-radius:18px;
+  padding:14px 16px;box-shadow:0 2px 12px rgba(24,44,74,.06);
+}
+.jar-stats{display:flex;gap:10px;}
+.jar-stat{
+  flex:1;display:flex;align-items:baseline;gap:5px;min-width:0;
+  background:rgba(var(--primary-rgb,18,183,245),.07);border-radius:12px;
+  padding:10px 12px;font-size:12px;color:var(--sub);
+}
+.jar-stat .js-ic{font-size:15px;}
+.jar-stat .js-tx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.jar-stat b{font-size:20px;font-weight:700;color:var(--primary);line-height:1;}
+.jar-stat .js-unit{font-size:11px;color:var(--sub);}
+.jar-enc{
+  margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);
+  font-size:12.5px;color:#8b909a;line-height:1.6;text-align:center;
+}
+/* 中部：放大玻璃瓶（瓶身细节见下方 .jar-bottle 系列） */
+.jar-stage{display:grid;place-items:center;padding-top:30px;}
+/* 底部：下一颗星进度 */
+.jar-progress{padding:0 6px;}
+.jp-text{font-size:12.5px;color:var(--sub);text-align:center;margin-bottom:8px;}
+.jp-text b{color:var(--primary);font-size:14px;}
+.jp-bar{
+  height:8px;border-radius:4px;overflow:hidden;
+  background:rgba(var(--primary-rgb,18,183,245),.14);
+}
+.jp-bar i{
+  display:block;height:100%;border-radius:4px;
+  background:linear-gradient(90deg,var(--primary),var(--primary-2));
+  transition:width .4s ease;
+}
+/* 玻璃瓶身：圆角 + 半透明渐变 + 内外阴影，模拟玻璃质感 */
+.jar-bottle{
+  position:relative;width:56px;height:76px;
+  background:linear-gradient(155deg,rgba(255,255,255,.55),rgba(255,255,255,.16) 45%,rgba(170,210,250,.28));
+  border:1.5px solid rgba(255,255,255,.8);
+  border-radius:14px 14px 20px 20px;
+  box-shadow:
+    inset 0 2px 5px rgba(255,255,255,.65),
+    inset 0 -8px 12px rgba(120,170,220,.20),
+    0 4px 10px rgba(30,60,100,.12);
+}
+/* 二级页放大版 */
+.jar-bottle.big{
+  width:150px;height:208px;
+  border-radius:26px 26px 38px 38px;
+  border-width:2px;
+  box-shadow:
+    inset 0 4px 10px rgba(255,255,255,.7),
+    inset 0 -18px 28px rgba(120,170,220,.22),
+    0 14px 30px rgba(30,60,100,.16);
+}
+/* 瓶颈（伪元素，继承瓶身玻璃质感） */
+.jar-bottle::before{
+  content:'';position:absolute;left:50%;top:-11px;transform:translateX(-50%);
+  width:22px;height:11px;
+  background:linear-gradient(155deg,rgba(255,255,255,.55),rgba(255,255,255,.2));
+  border:1.5px solid rgba(255,255,255,.8);border-bottom:none;
+  border-radius:5px 5px 0 0;
+}
+.jar-bottle.big::before{
+  top:-26px;width:52px;height:26px;
+  border-radius:10px 10px 0 0;border-width:2px;
+}
+/* 瓶身高光：左侧一道斜向亮条 */
+.jar-bottle::after{
+  content:'';position:absolute;left:7px;top:9px;width:7px;height:52%;
+  border-radius:6px;transform:rotate(8deg);
+  background:linear-gradient(180deg,rgba(255,255,255,.9),rgba(255,255,255,0));
+  pointer-events:none;
+}
+.jar-bottle.big::after{left:16px;top:20px;width:14px;border-radius:12px;}
+/* 软木塞 */
+.jar-cork{
+  position:absolute;left:50%;top:-17px;transform:translateX(-50%);
+  width:18px;height:9px;border-radius:3px 3px 2px 2px;
+  background:linear-gradient(180deg,#d9a86c,#b9834f);
+  box-shadow:0 1px 2px rgba(90,60,30,.35);
+}
+.jar-bottle.big .jar-cork{top:-36px;width:40px;height:14px;border-radius:5px 5px 3px 3px;}
+/* 星星容器：贴瓶底，溢出裁切 */
+.jar-stars{
+  position:absolute;left:3px;right:3px;top:5px;bottom:3px;
+  overflow:hidden;border-radius:10px 10px 16px 16px;
+}
+.jar-bottle.big .jar-stars{left:8px;right:8px;top:10px;bottom:8px;border-radius:18px 18px 30px 30px;}
+/* 星星：发光 + 呼吸（--bd 由 JS 逐颗写入，节奏错开不整齐划一） */
+.jar-star{
+  position:absolute;line-height:1;user-select:none;pointer-events:none;
+  transform-origin:center;
+  text-shadow:0 0 6px rgba(255,214,90,.95),0 0 12px rgba(255,180,60,.55);
+  animation:jarBreathe var(--bd,2.4s) ease-in-out infinite alternate;
+}
+.jar-bottle.big .jar-star{text-shadow:0 0 8px rgba(255,214,90,.95),0 0 16px rgba(255,180,60,.6);}
+/* 新星星：从瓶口掉落到瓶底的弹跳；呼吸动画延迟到落地后接续 */
+.jar-star.drop{
+  animation:
+    jarDrop .9s cubic-bezier(.34,1.56,.5,1) both,
+    jarBreathe var(--bd,2.4s) ease-in-out .95s infinite alternate;
+}
+@keyframes jarBreathe{
+  from{opacity:.72;transform:scale(.9);}
+  to{opacity:1;transform:scale(1.08);}
+}
+@keyframes jarDrop{
+  0%{transform:translateY(-210px) scale(.6);opacity:0;}
+  55%{transform:translateY(6px) scale(1.12);opacity:1;}
+  75%{transform:translateY(-9px) scale(1);}
+  100%{transform:translateY(0) scale(1);opacity:1;}
+}
+/* 超量计数角标（星星数超过渲染上限时显示在瓶身右下角） */
+.jar-badge{
+  position:absolute;right:-8px;bottom:-8px;z-index:2;
+  min-width:24px;height:24px;padding:0 7px;border-radius:12px;
+  background:var(--primary);color:#fff;font-size:12px;font-weight:600;
+  display:grid;place-items:center;box-shadow:0 2px 6px rgba(0,0,0,.18);
+}
+/* 断联暗淡：整瓶灰度 + 星星熄灭（不发光、不呼吸） */
+.jar-page.dim .jar-bottle{filter:grayscale(.95) brightness(.78);}
+.jar-page.dim .jar-star{text-shadow:none;animation:none;opacity:.6;}
+.jar-page.dim .jar-stat b{color:var(--sub);}
+
+/* Toast 长文本保护：动态星星总数再大也不撑破变形（自动换行、限制最大宽度） */
+.toast{
+  max-width:80vw !important;
+  white-space:normal !important;
+  word-break:break-all !important;
+  line-height:1.5 !important;
+}

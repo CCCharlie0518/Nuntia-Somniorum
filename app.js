@@ -2,7 +2,7 @@
 'use strict';
 
 /* 全局版本号：显示在设置页最底部；日后发版只需改这一处 */
-const APP_VERSION = 'v8.0.0';
+const APP_VERSION = 'v8.1.0';
 
 /* =========================================================
  * 一、基础工具函数
@@ -670,6 +670,8 @@ function defaultState() {
     music: { name: '', cover: '', playMode: 'sequence', list: [] },
     /* 桌面照片墙：最多 1 张压缩后的 dataURL，随本地存储与完整备份一起保存 */
     photoWall: { images: [] },
+    /* 拾光瓶：星星数 / 累计消息数(每 100 条 +1 星) / 连续聊天天数 / 最近聊天日期 / 断联暗淡标记 */
+    jarData: { stars: 0, totalMessages: 0, streakDays: 0, lastChatDate: '', isDimmed: false },
     homeQuote: '今天也要好好照顾自己，慢一点也没关系。',
     /* 桌面「情侣空间」组件：双头像（Emoji 或图片 dataURL/URL）、双名字、相恋天数 */
     couple: { meAvatar: '🧑‍🦰', meName: '我', partnerAvatar: '🧑‍🦱', partnerName: 'TA', days: 100 },
@@ -838,6 +840,15 @@ function mergeState(saved) {
   ['roles', 'cards', 'cardGroups', 'stickers', 'letters', 'moments', 'quizTemplates', 'userPatCards', 'taPatCards', 'periods', 'dailyReminders'].forEach(k => {
     if (!Array.isArray(out[k])) out[k] = [];
   });
+  /* 拾光瓶：旧数据缺字段时补默认值，数值字段归一为非负整数 */
+  const jdSrc = (out.jarData && typeof out.jarData === 'object') ? out.jarData : {};
+  out.jarData = {
+    stars: Math.max(0, Math.floor(Number(jdSrc.stars) || 0)),
+    totalMessages: Math.max(0, Math.floor(Number(jdSrc.totalMessages) || 0)),
+    streakDays: Math.max(0, Math.floor(Number(jdSrc.streakDays) || 0)),
+    lastChatDate: typeof jdSrc.lastChatDate === 'string' ? jdSrc.lastChatDate : '',
+    isDimmed: jdSrc.isDimmed === true
+  };
   /* 旧版日常提醒没有长期字段：补默认值（isLongTerm=false，startDate/endDate=date），保证区间判断统一 */
   out.dailyReminders = out.dailyReminders.map(r => {
     if (!r || typeof r !== 'object') return r;
@@ -3429,6 +3440,7 @@ function sendUserMessage(roleId, payload) {
   chatOf(roleId).push(msg);
   if (chatQuote && chatQuote.roleId === roleId) { chatQuote = null; renderQuoteBar(); }
   state.unread[roleId] = 0;
+  jarOnChatActivity();  /* 拾光瓶：发送消息参与每日集星 / 断联复活 */
 
   /* 先上屏：只在列表末尾追加这一条消息的 DOM 节点，不重绘整个列表。
      仅在「当前聊天页 + 普通文字/图文消息」时走增量路径，其余情况退回整体渲染。 */
@@ -3900,6 +3912,7 @@ function pushDreamMessage(roleId, payload) {
   if (!roleById(roleId)) return;
   const msg = Object.assign({ id: uid(), role: 'dream', type: 'text', ts: Date.now() }, payload);
   chatOf(roleId).push(msg);
+  jarOnChatActivity();  /* 拾光瓶：收到 TA 消息同样计为当日互动 */
   const open = currentRoute.page === 'chat' && currentRoute.roleId === roleId;
   if (!open) state.unread[roleId] = (state.unread[roleId] || 0) + 1;
   persist();
@@ -4733,6 +4746,8 @@ const APP_ICONS = {
   listen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><path d="M4 14a2 2 0 0 1 2-2h1v8H6a2 2 0 0 1-2-2Z"/><path d="M20 14a2 2 0 0 0-2-2h-1v8h1a2 2 0 0 0 2-2Z"/></svg>',
   /* 提醒：线条风铃铛 */
   reminder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16v-5a6 6 0 1 0-12 0v5l-2 2h16Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>',
+  /* 拾光瓶：线条风玻璃瓶（软木塞 + 瓶颈 + 瓶内一颗星） */
+  jar: '<svg viewBox="0 0 24 24"><path d="M9.5 3.4h5"/><path d="M10 3.4v4.2c0 .5-.17.98-.5 1.38A5.2 5.2 0 0 0 6.6 13.4v3.4A3.9 3.9 0 0 0 10.5 20.6h3a3.9 3.9 0 0 0 3.9-3.9v-3.4a5.2 5.2 0 0 0-2.9-4.42.9.9 0 0 1-.5-.78V3.4"/><path d="m12 11.6.66 1.46 1.58.17-1.18 1.08.33 1.56L12 15.2l-1.39.67.33-1.56-1.18-1.08 1.58-.17Z"/></svg>',
   /* 检查更新：线条风循环刷新（尺寸与描边由 .app-update-btn svg 统一控制） */
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>'
 };
@@ -4759,6 +4774,7 @@ const HOME_APPS = [
   { route: 'pet', label: '桌面宠物' },
   { route: 'readtogether', label: '一起做' },
   { route: 'reminder', label: '提醒' },
+  { route: 'jar', label: '拾光瓶' },
   { route: 'settings', label: '设置' }
 ];
 
@@ -6237,6 +6253,117 @@ function renderListenPage() {
   musicSyncAll();
 }
 
+/* =========================================================
+ * 拾光瓶：陪伴养成（桌面图标入口 + 全屏二级页，纯 CSS/Emoji，无图片素材）
+ * 规则：
+ *   打卡 —— 每天首次收发消息 +1 颗星（一天只集一颗）；
+ *   断联 —— 启动时检查，lastChatDate 距今超过 2 天，瓶子变暗（星星失去光泽）；
+ *   复活 —— 暗淡状态下任意一条消息即恢复发光，并照常集当天的星。
+ * ========================================================= */
+const JAR_RENDER_MAX = 60;   /* 瓶内最多渲染的星星节点数，超出以角标计数，防止 DOM 过多卡顿 */
+let jarDropPending = false;  /* 下一次拾光瓶页渲染时，最新那颗星播放「瓶口掉落」动画 */
+
+/* 两个 YYYY-MM-DD 之间的整天差（b - a），按本地零点计算，不受时分秒影响 */
+function jarDaysBetween(a, b) {
+  const pa = String(a || '').split('-'), pb = String(b || '').split('-');
+  if (pa.length !== 3 || pb.length !== 3) return 0;
+  const da = new Date(+pa[0], +pa[1] - 1, +pa[2]);
+  const db = new Date(+pb[0], +pb[1] - 1, +pb[2]);
+  return Math.round((db - da) / 86400000);
+}
+
+/* 启动检查：断联超过 2 天 → 瓶子进入暗淡状态（在首次渲染前调用，直接以最新状态上屏） */
+function jarCheckStreak() {
+  const jd = state.jarData;
+  if (!jd || !jd.lastChatDate) return;
+  if (jarDaysBetween(jd.lastChatDate, todayKey()) > 2 && !jd.isDimmed) {
+    jd.isDimmed = true;
+    persist();
+  }
+}
+
+/* 聊天互动钩子：发送与接收消息都会调用。
+ * 规则：每条消息 totalMessages+1；每满 100 条 stars+1；
+ *       连续天数按自然日结算（昨天 +1 / 断签重置 1 / 当天不变）；
+ *       暗淡状态下任意一条消息即复活。 */
+function jarOnChatActivity() {
+  const jd = state.jarData;
+  if (!jd) return;
+  const today = todayKey();
+  const prev = jd.lastChatDate;
+
+  jd.totalMessages += 1;
+  if (prev !== today) {
+    jd.streakDays = (prev && jarDaysBetween(prev, today) === 1) ? jd.streakDays + 1 : 1;
+  }
+  jd.lastChatDate = today;              /* 每次聊天都更新最近聊天日期 */
+  if (jd.isDimmed) jd.isDimmed = false; /* 复活：星星恢复发光 */
+
+  if (jd.totalMessages % 100 === 0) {
+    jd.stars += 1;
+    jarDropPending = true;
+    /* 动态总数提示：模板字符串实时读取最新 stars */
+    showToast(`✨ 恭喜！你们聊了 100 句话，拾光瓶里多了一颗星星！当前共有 ${jd.stars} 颗星星。`);
+  }
+  persist();
+  renderJarIfOpen();
+}
+
+/* 二级页重绘入口：仅当拾光瓶页正在展示时重绘（掉落动画标记随之消费） */
+function renderJarIfOpen() {
+  if (currentRoute && currentRoute.page === 'sub' && currentRoute.name === 'jar') renderJarPage();
+}
+
+/* 动态鼓励语：按连续天数 / 星星数分档显示 */
+function jarEncourage(jd) {
+  if (jd.isDimmed) return '瓶子有点想你了，去和 TA 聊聊吧';
+  if (jd.streakDays >= 30) return '日复一日的陪伴，是最长情的告白。';
+  if (jd.streakDays >= 7) return '每一次倾诉，都在这里留下了闪亮的痕迹。';
+  if (jd.stars >= 5) return '瓶中的星光越来越亮，都是你们说过的话。';
+  return '每一百句悄悄话，都会化作瓶中的星光。';
+}
+
+/* 拾光瓶二级页：顶部数据面板 + 中央玻璃瓶 + 底部进度；布局确定性伪随机，重绘不跳动 */
+function renderJarPage() {
+  const jd = state.jarData || { stars: 0, totalMessages: 0, streakDays: 0, lastChatDate: '', isDimmed: false };
+  const total = Math.max(0, Math.floor(jd.stars) || 0);
+  const n = Math.min(total, JAR_RENDER_MAX);
+  const dropIdx = jarDropPending ? n - 1 : -1;
+  jarDropPending = false;   /* 动画类名已写入本次 HTML，立即清除标记，避免下次重绘重复播放 */
+  let stars = '';
+  for (let i = 0; i < n; i++) {
+    const left = 6 + ((i * 37 + 11) % 72);               /* 6% ~ 78%，层内横向错开 */
+    const bottom = 6 + Math.floor(i / 6) * 16 + ((i * 17) % 5);  /* 每 6 颗叠一层，层内 ±4px 错落 */
+    const size = 15 + ((i * 7) % 7);                     /* 15 ~ 21px */
+    const bd = (2 + ((i * 13) % 10) * 0.14).toFixed(2);  /* 呼吸周期 2.0 ~ 3.3s，各不相同 */
+    stars += `<span class="jar-star${i === dropIdx ? ' drop' : ''}" style="left:${left}%;bottom:${bottom}px;font-size:${size}px;--bd:${bd}s">${i % 4 === 3 ? '⭐' : '✨'}</span>`;
+  }
+  /* 距离下一颗星：100 - (累计 % 100)；余数为 0 时新一轮刚开始，差 100 句 */
+  const remain = 100 - (jd.totalMessages % 100);
+  const pct = (jd.totalMessages % 100) / 100 * 100;
+  subShell('拾光瓶', `
+    <div class="jar-page${jd.isDimmed ? ' dim' : ''}">
+      <div class="jar-panel">
+        <div class="jar-stats">
+          <div class="jar-stat"><span class="js-ic">⭐</span><span class="js-tx">累计星光</span><b>${total}</b><span class="js-unit">颗</span></div>
+          <div class="jar-stat"><span class="js-ic">🔥</span><span class="js-tx">已连续聊天</span><b>${jd.streakDays}</b><span class="js-unit">天</span></div>
+        </div>
+        <div class="jar-enc">${esc(jarEncourage(jd))}</div>
+      </div>
+      <div class="jar-stage">
+        <div class="jar-bottle big">
+          <i class="jar-cork"></i>
+          <div class="jar-stars">${stars}</div>
+          ${total > JAR_RENDER_MAX ? `<b class="jar-badge">×${total}</b>` : ''}
+        </div>
+      </div>
+      <div class="jar-progress">
+        <div class="jp-text">距离下一颗星星还需要 <b>${remain}</b> 句话哦~</div>
+        <div class="jp-bar"><i style="width:${pct}%"></i></div>
+      </div>
+    </div>`);
+}
+
 /* ---------- 桌面 3×2 音乐组件 / 1×2 照片墙 ---------- */
 function musicWidgetHTML() {
   const cover = musicCoverURL();
@@ -6915,9 +7042,10 @@ function applyBeautify() {
 
 /* =========================================================
  * 十二·五、美化 - 样式自定义（字体 / 气泡）
- * 数据流：输入框原始文本 → 智能解析（纯链接 vs 带大括号的完整 CSS）
- *         → 原样注入 <style id="custom-style-injector">（只补 !important）→ 持久化
- * 纯属性（如 background: pink;）不再自动包裹，直接弹窗提示格式错误。
+ * 数据流：输入框原始文本 → 智能解析（链接 / 完整 CSS / 纯属性包裹）
+ *         → 注入 <style id="custom-style-injector">（补 !important + 锁 #page-chat 作用域）→ 持久化
+ * 防污染：全局注入入口 applyCustomStyleInline 统一调用 csScopeToChat，
+ *         Toast（#toast）与来电弹窗（#callLayer）都在 #page-chat 之外，物理隔离。
  * ========================================================= */
 const CS_TEMPLATES = {
   bubble: `/* 请将 .your-bubble-class 替换为你网页实际的气泡类名 */
@@ -6977,7 +7105,8 @@ function applyCustomStyleInline(b) {
   const cs = (b && b.customStyle) || {};
   const applied = cs.applied || {};
   const css = [applied.font, applied.bubble].filter(Boolean).join('\n\n');
-  csInjector().textContent = css;
+  /* 防污染：注入全局前统一锁进 #page-chat 作用域（Toast / 来电弹窗都在 #page-chat 之外） */
+  csInjector().textContent = css ? csScopeToChat(css) : '';
 }
 
 /* 字体格式：按后缀推断 format()，保证浏览器能正确解码 */
@@ -7007,31 +7136,12 @@ function csFontFace(src, format, family) {
 }`;
 }
 
-/* 字体链接 → @font-face + 全站生效的基础选择器（原样注入，不做任何包裹） */
+/* 字体链接 → @font-face + 生效选择器（原样注入；全局注入时再统一锁 #page-chat 作用域） */
 function csFontLinkCSS(url) {
   const clean = url.split('?')[0].split('#')[0].toLowerCase();
   const family = csFontFamilyName(url);
   return `${csFontFace(url, csFontFormat(clean), family)}
 ${CS_FONT_SELECTOR} { font-family: '${family}' !important; }`;
-}
-
-/* 格式判定：既不是链接、也不含大括号 / @ 规则 → 视为纯属性，直接判为格式错误（不再自动包裹） */
-function csIsPureProps(raw) {
-  const s = String(raw == null ? '' : raw).trim();
-  if (!s) return false;
-  if (/^https?:\/\//i.test(s) && !/\s/.test(s)) return false;   /* 纯链接 */
-  if (/\{/.test(s)) return false;                                /* 完整 CSS */
-  if (/^@/.test(s)) return false;                                /* @ 规则 */
-  return true;
-}
-
-/* 纯属性格式错误：弹窗提示（不写入、不注入） */
-function csShowFormatError() {
-  showModal({
-    title: '格式错误',
-    body: '<p class="modal-text">请用大括号 {} 包裹你的样式，例如<br><code>.bubble { background: pink; }</code></p>',
-    actions: [{ label: '知道了', kind: 'primary' }]
-  });
 }
 
 /* ---------------- 强制提升权重：给用户代码的每条声明补 !important ----------------
@@ -7131,16 +7241,69 @@ function csAliasBubbleCss(css) {
   return out.join('\n');
 }
 
-/* 智能解析：只处理两种情况——纯链接、带大括号的完整 CSS。
-   纯属性不再自动包裹，返回空串并由点击事件弹窗提示格式错误。 */
-function csBuildCSS(raw) {
+/* ---------------- 防污染护盾：全局注入前把每条规则锁进 #page-chat 作用域 ----------------
+ * 背景：Toast（#toast）在 #app 之外，来电弹窗（#callLayer）在 #viewport 之外，
+ *       二者都不在 #page-chat 内。用户一旦写了 div / .bubble 这类宽泛选择器，
+ *       全局注入就会误伤系统浮层。统一加 #page-chat 前缀后物理隔离。
+ * 规则：
+ *   1. 普通选择器一律加 "#page-chat " 前缀（已带前缀的不重复加）；
+ *   2. body / html / :root 改写为 #page-chat —— 字体在聊天页整体继承生效，
+ *      同时保证注入样式绝对碰不到真正的 body 与全局 div；
+ *   3. @font-face / @keyframes 是定义块、不渲染任何元素，原样保留；
+ *   4. @media / @supports 递归处理内部；
+ *   5. @import 无法作用域化，统一提取到最前并补回分号（CSS 规范也要求它在规则之前）。
+ * ---------------------------------------------------------------------------------- */
+function csScopeSelectorToChat(head) {
+  return head.split(',').map(s => {
+    const t = s.trim();
+    if (!t) return '';
+    if (/^(?:body|html|:root)\b/i.test(t)) return t.replace(/^(?:body|html|:root)\b/i, '#page-chat');
+    if (/^#page-chat\b/i.test(t)) return t;
+    return '#page-chat ' + t;
+  }).filter(Boolean).join(', ');
+}
+
+function csScopeToChat(css) {
+  const split = csSplitTopRules(css);
+  if (split.broken) return css;   /* 语法有问题时原样返回，交给语法校验报错 */
+  const imports = [];
+  const out = [];
+  split.rules.forEach(rule => {
+    const idx = rule.indexOf('{');
+    if (idx < 0) {
+      /* @import / @charset 等顶层语句：拆分时分号被吃掉，这里补回 */
+      imports.push(/;\s*$/.test(rule) ? rule : rule.replace(/\s*$/, ';'));
+      return;
+    }
+    const head = rule.slice(0, idx);
+    const headClean = head.replace(/\/\*[\s\S]*?\*\//g, '').trim();
+    const end = rule.lastIndexOf('}');
+    const inner = rule.slice(idx + 1, end < 0 ? rule.length : end);
+    const tail = end < 0 ? '' : rule.slice(end);
+    if (/^@(font-face|keyframes|-webkit-keyframes|-moz-keyframes|charset|namespace|page|counter-style|property|font-feature-values)/i.test(headClean)) {
+      out.push(rule);
+      return;
+    }
+    if (headClean.charAt(0) === '@') {
+      out.push(head + '{' + csScopeToChat(inner) + tail);
+      return;
+    }
+    out.push(csScopeSelectorToChat(head) + '{' + inner + tail);
+  });
+  return imports.concat(out).join('\n');
+}
+
+/* 智能解析：纯链接 → @font-face / @import；带大括号的完整 CSS → 原样注入（只补 !important）；
+   纯属性 → 自动包裹该分类的精准选择器（气泡 .msg .bubble / 字体 body, .chat-text）。
+   注意：这里不做作用域；全局注入入口 applyCustomStyleInline 会统一再套 #page-chat。 */
+function csBuildCSS(raw, tab) {
   const text = String(raw == null ? '' : raw).trim();
   if (!text) return '';
 
   /* 1) 链接：整段只有一个 URL 时才按链接处理，避免把含 http 的代码误判 */
   if (/^https?:\/\//i.test(text) && !/\s/.test(text)) {
     const clean = text.split('?')[0].split('#')[0].toLowerCase();
-    /* 字体直链（.ttf / .woff / .woff2 / .otf）→ @font-face + 全站生效的基础选择器 */
+    /* 字体直链（.ttf / .woff / .woff2 / .otf）→ @font-face + 生效选择器 */
     if (/\.(ttf|otf|woff2|woff|eot)$/.test(clean)) return csFontLinkCSS(text);
     /* CSS 文件 / 其它链接 → 按样式表导入（@import 不能加 !important） */
     return `@import url('${text}');`;
@@ -7154,12 +7317,13 @@ function csBuildCSS(raw) {
     return alias ? base + '\n\n' + alias : base;
   }
 
-  /* 3) 纯属性：彻底废除自动包裹，交由调用方提示格式错误 */
-  return '';
+  /* 3) 纯属性：自动包裹该分类的精准选择器（注入时再锁 #page-chat，绝不污染系统浮层） */
+  const target = tab === 'bubble' ? '.msg .bubble' : 'body, .chat-text';
+  return csForceImportant(`${target} { ${text} }`);
 }
 
 /* ---------------- 识别并应用：语法校验 / 外链预检 ----------------
- * 校验针对「解析后要注入的最终 CSS」；纯属性已在点击前被拦下并提示格式错误。
+ * 校验针对「解析后要注入的最终 CSS」。
  * -------------------------------------------------------------- */
 
 /* 把 CSS 拆成顶层规则块：insertRule 一次只能插一条规则，
@@ -7334,11 +7498,35 @@ function csScopeCSS(css, prefix) {
   return (imports ? imports + '\n' : '') + csScopeBlock(rest, prefix);
 }
 
-/* 实时预览：解析当前分类的草稿并注入预览作用域（预览不套 #app 前缀，否则永远不命中） */
+/* 超大样式（Base64 字体草稿可达几十 MB）判定阈值：超过则构建 / 注入一律异步 */
+const CS_BIG_CSS_LEN = 1024 * 1024;
+
+/* 实时预览：解析当前分类的草稿并注入预览作用域（预览不套 #app 前缀，否则永远不命中）。
+ * 超大字体草稿走 setTimeout 异步注入，避免几十 MB 的 style 写入阻塞主线程造成假死；
+ * 异步分支在执行时重新读取草稿，清空操作不会被旧内容覆盖 */
 function csUpdatePreview() {
-  const style = csPreviewStyle();
-  const css = csBuildCSS(csDraft[csTab]);
-  style.textContent = css ? csScopeCSS(css, '.cs-preview') : '';
+  const draft = csDraft[csTab] || '';
+  if (draft.length > CS_BIG_CSS_LEN) {
+    setTimeout(() => {
+      try {
+        const css = csBuildCSS(csDraft[csTab] || '', csTab);
+        csPreviewStyle().textContent = css ? csScopeCSS(css, '.cs-preview') : '';
+      } catch (e) { /* 超大文本注入失败不影响页面其它功能 */ }
+    }, 0);
+    return;
+  }
+  const css = csBuildCSS(draft, csTab);
+  csPreviewStyle().textContent = css ? csScopeCSS(css, '.cs-preview') : '';
+}
+
+/* 全局注入：超大字体样式延迟到下一轮事件循环，防止点击「应用」时页面卡住 */
+function csApplyInlineDeferred() {
+  const css = ((state.beautify.customStyle.applied || {})[csTab]) || '';
+  if (css.length > CS_BIG_CSS_LEN) {
+    setTimeout(() => { try { applyCustomStyleInline(state.beautify); } catch (e) { /* 忽略 */ } }, 0);
+  } else {
+    applyCustomStyleInline(state.beautify);
+  }
 }
 
 /* localStorage 镜像：满足「保存到 localStorage」；预设含大字体时失败也无妨，IndexedDB 才是主存储 */
@@ -7400,16 +7588,13 @@ function csSwitchTab(mode) {
 
 /* 应用到全局：空输入视为清除该分类的自定义样式 */
 function csApplyCurrent() {
-  const raw = csDraft[csTab];
-  /* 纯属性（既不是链接也没有大括号）直接拦下，不再自动包裹 */
-  if (csIsPureProps(raw)) { csShowFormatError(); return; }
-  const css = csBuildCSS(raw);
+  const css = csBuildCSS(csDraft[csTab], csTab);
   const cs = state.beautify.customStyle;
   cs.applied[csTab] = css;
   cs.tab = csTab;
   persist();
   customStyleMirror();
-  applyCustomStyleInline(state.beautify);
+  csApplyInlineDeferred();   /* 超大字体异步注入，防止阻塞主线程 */
   /* 方便排查：控制台能直接看到真正注入到 head 的最终 CSS */
   console.info('[样式自定义] 已注入 #custom-style-injector，长度 ' + css.length + '\n' + css);
   showToast(css ? '已应用到全局' : '已清除该分类的自定义样式');
@@ -7423,8 +7608,8 @@ function csSetStatus(kind, text) {
   el.textContent = text || '';
 }
 
-/* 识别并应用：清空状态 → 格式判定 → 语法校验 → 外链预检 → 原样注入 → 类名校验 → 落盘
-   带大括号的完整 CSS 永远原样注入；纯属性直接弹窗提示格式错误，绝不自动包裹 */
+/* 识别并应用：清空状态 → 语法校验 → 外链预检 → 原样注入 → 类名校验 → 落盘
+   带大括号的完整 CSS 永远原样注入，纯属性自动包裹该分类的精准选择器 */
 async function csApplyGuarded() {
   csSetStatus('', '');
   const raw = String(csDraft[csTab] || '').trim();
@@ -7433,14 +7618,8 @@ async function csApplyGuarded() {
     showToast('请输入代码');
     return;
   }
-  /* 纯属性（既不是链接也没有大括号）直接报错，不再自动包裹 */
-  if (csIsPureProps(raw)) {
-    csSetStatus('error', '❌ 格式错误：请用大括号 {} 包裹你的样式');
-    csShowFormatError();
-    return;
-  }
-  /* 智能解析：链接 / 完整 CSS 原样注入 */
-  const css = csBuildCSS(raw);
+  /* 智能解析：链接 / 完整 CSS 原样注入，纯属性自动包裹 */
+  const css = csBuildCSS(raw, csTab);
   if (!css) {
     csSetStatus('error', '❌ 请输入代码');
     showToast('请输入代码');
@@ -7472,7 +7651,7 @@ async function csApplyGuarded() {
   cs.tab = csTab;
   persist();
   customStyleMirror();
-  applyCustomStyleInline(state.beautify);
+  csApplyInlineDeferred();   /* 超大字体异步注入，防止阻塞主线程 */
   console.info('[样式自定义] 已注入 #custom-style-injector，长度 ' + css.length + '\n' + css);
 
   /* 4) 类名校验：命中需求指定的三个类名，或项目真实在用的 .bubble / .chat-text，即算作用到气泡上 */
@@ -7490,9 +7669,7 @@ async function csSavePreset() {
   if (name === null) return;
   if (!name) { showToast('预设名称不能为空'); return; }
   const raw = csDraft[csTab] || '';
-  /* 纯属性不能保存为预设，同样提示格式错误 */
-  if (csIsPureProps(raw)) { csShowFormatError(); return; }
-  const css = csBuildCSS(raw);
+  const css = csBuildCSS(raw, csTab);
   if (!css) { showToast('请先粘贴或上传内容'); return; }
   const cs = state.beautify.customStyle;
   cs.presets.unshift({
@@ -7507,7 +7684,9 @@ async function csSavePreset() {
   persist();
   customStyleMirror();
   renderBeautifyPage();
-  showToast('预设已保存');
+  /* 大字体预设（代码 + Base64 字体数据）会明显占用 IndexedDB 空间，保存后提醒 */
+  const big = raw.length + css.length + String(csLastFontData || '').length > CS_BIG_CSS_LEN;
+  showToast(big ? '预设已保存。注意：保存大字体预设会占用较多空间' : '预设已保存');
 }
 
 function csLoadPreset(id) {
@@ -7533,25 +7712,66 @@ async function csDeletePreset(id) {
   showToast('已删除预设');
 }
 
-/* 上传 TTF：读成 Base64 → 生成 @font-face + 使用规则，填入字体分类的输入框 */
+/* 上传 TTF：读成 Base64 → 生成 @font-face + 使用规则，填入字体分类的输入框。
+ * 大小限制从 6MB 放宽到 30MB 软上限（超过只警告、不拦截）；
+ * 大文件读取期间显示全局 Loading，防止十几 MB 转换 Base64 时用户误以为卡死 */
+const CS_FONT_SOFT_LIMIT = 30 * 1024 * 1024;   /* 30MB 软上限 */
+
+/* 全局 Loading（字体解析专用）：动态创建 / 销毁遮罩，不影响其它页面 */
+function csFontLoading(show) {
+  let mask = document.getElementById('csFontLoading');
+  if (show) {
+    if (mask) return;
+    mask = document.createElement('div');
+    mask.id = 'csFontLoading';
+    mask.style.cssText = 'position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,.35);display:grid;place-items:center;';
+    mask.innerHTML = '<div style="background:rgba(24,30,40,.92);color:#fff;font-size:13px;padding:12px 22px;border-radius:12px;line-height:1.6;">正在解析字体文件，请稍候...</div>';
+    document.body.appendChild(mask);
+  } else if (mask) {
+    mask.remove();
+  }
+}
+
 function csReadFontFile(file) {
   if (!file) return;
-  if (file.size > 6 * 1024 * 1024) { showToast('字体文件过大（建议 6MB 以内）'); return; }
+  /* 格式粗筛：扩展名或 font/* MIME 至少要过一个，明显不对的文件直接提示 */
+  const okType = /\.(ttf|otf|woff2?|eot)$/i.test(file.name) || /^font\//.test(file.type || '');
+  if (!okType) { showToast('字体解析失败，请检查文件格式'); return; }
+  /* 超 30MB 不拦截，仅提示存储与加载开销 */
+  if (file.size > CS_FONT_SOFT_LIMIT) {
+    showToast('建议使用 20MB 以内的 TTF/OTF 字体文件。较大的字体会占用较多存储空间，可能影响网页加载速度。');
+  }
+  csFontLoading(true);
   const reader = new FileReader();
   reader.onload = () => {
-    const data = String(reader.result || '');
-    if (!data) { showToast('字体读取失败，换一个文件试试'); return; }
-    csLastFontData = data;
-    if (csTab !== 'font') csSwitchTab('font');
-    csDraft.font = csFontFace(data, csFontFormat(file.name), 'CustomFont') + '\n' +
-      `${CS_FONT_SELECTOR} { font-family: 'CustomFont', -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif !important; }`;
-    const input = $('#csInput');
-    if (input) input.value = csDraft.font;
-    csUpdatePreview();
-    showToast('字体已载入，点【应用到全局】生效');
+    /* 异步落地：Base64 字符串可达几十 MB，生成代码与写输入框放到下一轮事件循环，防止阻塞主线程 */
+    setTimeout(() => {
+      try {
+        const data = String(reader.result || '');
+        if (!data || data.indexOf('data:') !== 0) throw new Error('bad font data');
+        csLastFontData = data;
+        if (csTab !== 'font') csSwitchTab('font');
+        csDraft.font = csFontFace(data, csFontFormat(file.name), 'CustomFont') + '\n' +
+          `${CS_FONT_SELECTOR} { font-family: 'CustomFont', -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif !important; }`;
+        const input = $('#csInput');
+        if (input) input.value = csDraft.font;
+        csUpdatePreview();   /* 内部对超大文本已做异步注入 */
+        showToast('字体已载入，点【应用到全局】生效');
+      } catch (e) {
+        showToast('字体解析失败，请检查文件格式');
+      } finally {
+        csFontLoading(false);
+      }
+    }, 30);
   };
-  reader.onerror = () => showToast('字体读取失败，换一个文件试试');
-  reader.readAsDataURL(file);
+  reader.onerror = () => { csFontLoading(false); showToast('字体解析失败，请检查文件格式'); };
+  reader.onabort = reader.onerror;
+  try {
+    reader.readAsDataURL(file);
+  } catch (e) {
+    csFontLoading(false);
+    showToast('字体解析失败，请检查文件格式');
+  }
 }
 
 /* 样式自定义面板（美化页最下方） */
@@ -7578,7 +7798,7 @@ function customStylePanelHTML() {
       </div>
       <!-- 代码输入区 -->
       <textarea class="cs-input" id="csInput" spellcheck="false" placeholder="请粘贴 CSS 代码、在线字体链接或 CSS 文件链接">${esc(csDraft[csTab] || '')}</textarea>
-      <div class="muted" style="font-size:12px;margin:6px 0 0;line-height:1.6">样式必须用大括号 {} 包裹（纯属性如 background: pink; 会提示格式错误）；含花括号的代码原样注入并自动补 !important。贴字体直链（.ttf / .woff / .woff2）会自动生成 @font-face 并让全站文字生效，贴 .css 链接会自动生成 @import。若应用成功但界面没变化，请检查类名是否命中 .msg.mine / .msg.theirs > .msg-body > .bubble（可在控制台检查）。</div>
+      <div class="muted" style="font-size:12px;margin:6px 0 0;line-height:1.6">样式只在聊天页内生效（自动锁定 #page-chat 作用域），绝不会污染 Toast、来电弹窗等系统界面。纯属性（如 background: pink;）会自动包裹气泡/文字选择器并强制加 !important；含花括号的代码原样注入。贴字体直链（.ttf / .woff / .woff2）自动生成 @font-face，贴 .css 链接自动生成 @import。若应用成功但界面没变化，请检查类名是否命中 .msg.mine / .msg.theirs > .msg-body > .bubble（可在控制台检查）。</div>
       <!-- 共用预览区：DOM 与聊天页完全一致（.msg.theirs / .msg.mine > .msg-body > .bubble），
            这样预览里生效的代码，在真实聊天页必然也生效 -->
       <div class="cs-preview" id="csPreview">
@@ -9675,6 +9895,7 @@ function renderSub(name) {
     case 'games': return renderPlayPage();           /* 旧路由兜底：桌面小游戏已并入【一起玩】 */
     case 'readtogether': return renderReadTogetherPage();
     case 'listen': return renderListenPage();
+    case 'jar': return renderJarPage();
     case 'reading': return renderReadingPage();
     case 'readingroom': return renderReadingRoomPage();
     case 'gomoku': return renderGomokuPage();
@@ -16744,6 +16965,7 @@ async function boot() {
   bindGlobalEvents();
   bindUpdateFeature();  /* 检查更新：二次确认弹窗按钮只绑一次 */
   rdBindGlobal();       /* 一起读书：悬浮小聊天框与引用按钮的事件只绑一次 */
+  jarCheckStreak();     /* 拾光瓶：断联超 2 天进入暗淡状态（须在首次渲染桌面之前） */
   routeStack = [];
   currentRoute = { page: 'home' };
   applyRoute();
