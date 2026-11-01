@@ -2,7 +2,7 @@
 'use strict';
 
 /* 全局版本号：显示在设置页最底部；日后发版只需改这一处 */
-const APP_VERSION = 'v7.7.0';
+const APP_VERSION = 'v7.8.0';
 
 /* =========================================================
  * 一、基础工具函数
@@ -362,7 +362,9 @@ function defaultState() {
     nextAutoSnapshotAt: 0,
     nextAutoLetterAt: 0,
     nextTaGiftAt: 0,
-    nextTaRedPacketAt: 0
+    nextTaRedPacketAt: 0,
+    /* 上次离开页面的时间戳（毫秒）：离线消息横幅据此结算这段时间内的新消息与超时待办 */
+    lastSeenAt: 0
   };
 }
 
@@ -642,6 +644,9 @@ function mergeState(saved) {
   out.nextTaGiftAt = Number.isFinite(ntgf) ? ntgf : 0;
   const ntrp = Number(out.nextTaRedPacketAt);
   out.nextTaRedPacketAt = Number.isFinite(ntrp) ? ntrp : 0;
+  /* 离线补发提示：上次离开页面的时间戳，只接受合法正数，0 表示还没有记录 */
+  const lsa = Number(out.lastSeenAt);
+  out.lastSeenAt = Number.isFinite(lsa) && lsa > 0 ? lsa : 0;
   /* 后台保活 / 后台通知：旧数据补默认值（保活默认关闭、通知默认关闭，子开关默认开启） */
   out.settings.keepAliveEnabled = out.settings.keepAliveEnabled === true;
   out.settings.notifyEnabled = out.settings.notifyEnabled === true;
@@ -2337,17 +2342,25 @@ function renderChatPage(roleId) {
     closeStickerSheet();
     goBack();
   });
-  /* 双击聊天页 TA 头像 → 拍一拍 TA（与气泡头像入口共用冷却，见 userPatRole） */
+  /* 聊天页顶部 TA 头像：单击看「心声胶囊」，双击拍一拍（250ms 定时器分离，互不干扰） */
   const chatAvatar = $('#page-chat .chat-nav .avatar-wrap');
   if (chatAvatar) {
     chatAvatar.style.cursor = 'pointer';
-    chatAvatar.addEventListener('dblclick', () => userPatRole(roleId));
-    /* 移动端没有 dblclick：300ms 内连续两次点击视为双击 */
-    let lastAvatarTap = 0;
-    chatAvatar.addEventListener('click', () => {
-      const now = Date.now();
-      if (now - lastAvatarTap < 300) { lastAvatarTap = 0; userPatRole(roleId); }
-      else lastAvatarTap = now;
+    let avatarTapTimer = null;
+    chatAvatar.addEventListener('click', e => {
+      e.stopPropagation();
+      if (avatarTapTimer) {
+        /* 250ms 内第二次点击 → 双击：清掉单击定时器，执行原有的拍一拍 */
+        clearTimeout(avatarTapTimer);
+        avatarTapTimer = null;
+        userPatRole(roleId);
+        return;
+      }
+      /* 第一次点击：先挂起定时器，250ms 内没有第二次点击才按单击处理 */
+      avatarTapTimer = setTimeout(() => {
+        avatarTapTimer = null;
+        showTaStatusCard(roleId);
+      }, 250);
     });
   }
   $('#btnPlus').addEventListener('click', e => {
@@ -2493,7 +2506,8 @@ function confirmChatSnapshot(roleId) {
 const CHAT_PAGE_SIZE = 50;
 let chatRenderRole = null;
 let chatRenderLimit = CHAT_PAGE_SIZE;
-let lastAvatarTapAt = 0;
+/* 气泡旁 TA 头像的单击/双击定时器（250ms 内无第二次点击算单击） */
+let msgAvatarTapTimer = null;
 
 function loadOlderMessages() {
   const sc = $('#chatScroll');
@@ -2526,9 +2540,17 @@ function ensureChatDelegation(list) {
     const ava = t.closest('[data-avapat]');
     if (ava) {
       e.stopPropagation();
-      const now = Date.now();
-      if (now - lastAvatarTapAt < 300) { lastAvatarTapAt = 0; userPatRole(roleId); }
-      else lastAvatarTapAt = now;
+      /* 气泡旁 TA 头像：与顶部头像同一套 250ms 判定，单击看心声、双击拍一拍 */
+      if (msgAvatarTapTimer) {
+        clearTimeout(msgAvatarTapTimer);
+        msgAvatarTapTimer = null;
+        userPatRole(roleId);
+        return;
+      }
+      msgAvatarTapTimer = setTimeout(() => {
+        msgAvatarTapTimer = null;
+        showTaStatusCard(roleId);
+      }, 250);
       return;
     }
     const sticker = t.closest('[data-sticker-img]');
@@ -2552,10 +2574,6 @@ function ensureChatDelegation(list) {
       if (chatSelectedIds.has(id)) chatSelectedIds.delete(id); else chatSelectedIds.add(id);
       renderChatMessages();
     }
-  });
-  /* 双击 TA 消息气泡旁的头像 → 拍一拍 TA（移动端由上面的 300ms 双击判定兜底） */
-  list.addEventListener('dblclick', e => {
-    if (e.target.closest('[data-avapat]')) userPatRole(currentRoute.roleId);
   });
 }
 
@@ -2728,7 +2746,7 @@ function renderChatMessages() {
     html += `
       <div class="msg ${mine ? 'mine' : 'theirs'}${checked ? ' selected' : ''}" data-mid="${m.id}">
         ${chatSelectMode ? `<div class="sel-check">${checked ? '✓' : ''}</div>` : ''}
-        ${mine ? avatarHTML(state.my.avatar, 34) : `<span class="ava-pat" data-avapat>${roleAvatarHTML(role, 34)}</span>`}
+        ${mine ? avatarHTML(state.my.avatar, 34) : `<span class="ava-pat msg-ta-avatar" data-avapat>${roleAvatarHTML(role, 34)}</span>`}
         <div class="msg-body">
           ${inner}
           <div class="msg-time">${fmtClock(m.ts)}${readMark}</div>
@@ -10396,7 +10414,10 @@ function renderStickersPage() {
     <div class="panel">
       <div class="row-between">
         <div class="muted">支持本地上传（自动压缩）或填写图片链接。</div>
-        <button class="btn primary" id="stickerAdd">＋ 添加</button>
+        <div class="sticker-actions">
+          <button class="btn" id="stickerBatchBtn">批量导入</button>
+          <button class="btn primary" id="stickerAdd">＋ 添加</button>
+        </div>
       </div>
     </div>
     ${state.stickers.length
@@ -10412,6 +10433,13 @@ function renderStickersPage() {
       : '<div class="empty">还没有表情包<br>添加后即可在聊天面板发送</div>'}`);
 
   $('#stickerAdd').addEventListener('click', () => openStickerEditor(null));
+  /* 批量导入按钮：唤起常驻的多选输入框 */
+  $('#stickerBatchBtn').addEventListener('click', () => {
+    const input = $('#stickerBatchInput');
+    if (!input) return;
+    input.value = '';   /* 清空旧值，允许连续两次选择同一批文件 */
+    input.click();
+  });
   $$('[data-preview]').forEach(el => el.addEventListener('click', () => {
     const s = state.stickers.find(x => x.id === el.dataset.preview);
     if (s) showLightbox(s.data);
@@ -10427,6 +10455,103 @@ function renderStickersPage() {
     renderStickersPage();
     showToast('已删除');
   }));
+}
+
+/* ===== 表情包批量导入 ===== */
+/* 压缩单张图片：等比缩放到最大边 maxWidth，再转 JPEG(0.7) 的 Base64，回调返回 dataURL 或 null */
+function compressImage(file, maxWidth, callback) {
+  const max = Math.max(1, Number(maxWidth) || 200);
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.width || 1, img.height || 1));
+      const w = Math.max(1, Math.round((img.width || 1) * scale));
+      const h = Math.max(1, Math.round((img.height || 1) * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      /* JPEG 不支持透明，先铺白底，避免透明区域变成黑块 */
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      callback(canvas.toDataURL('image/jpeg', 0.7));
+    };
+    img.onerror = () => callback(null);
+    img.src = reader.result;
+  };
+  reader.onerror = () => callback(null);
+  reader.readAsDataURL(file);
+}
+
+/* Promise 版压缩：供 async/await 串行调用，保证一张处理完再处理下一张 */
+function compressImageAsync(file, maxWidth) {
+  return new Promise(resolve => compressImage(file, maxWidth, resolve));
+}
+
+/* 批量导入期间的全局 Loading 遮罩 */
+let stickerLoadingEl = null;
+function showStickerLoading(text) {
+  hideStickerLoading();
+  const el = document.createElement('div');
+  el.className = 'sticker-loading';
+  el.id = 'stickerLoading';
+  el.innerHTML = `<div class="st-loading-box"><span class="st-loading-spin"></span><span>${esc(text)}</span></div>`;
+  document.body.appendChild(el);
+  stickerLoadingEl = el;
+}
+function hideStickerLoading() {
+  if (stickerLoadingEl && stickerLoadingEl.parentNode) stickerLoadingEl.parentNode.removeChild(stickerLoadingEl);
+  stickerLoadingEl = null;
+}
+
+/* 批量入库：一次性写盘；容量不足时回滚这批表情并给出专项提示，避免内存与落盘不一致 */
+async function saveStickerBatch(added) {
+  const before = state.stickers.slice();
+  state.stickers = before.concat(added);
+  try {
+    let ok = true;
+    if (Storage.mode === 'local') {
+      /* localStorage 模式：同步写入，QuotaExceededError 可以被 try-catch 精准捕获 */
+      localStorage.setItem(STATE_KEY, JSON.stringify(state));
+    } else {
+      ok = await Storage.set(state);
+    }
+    if (!ok) throw new Error('storage-write-failed');
+    return true;
+  } catch (err) {
+    state.stickers = before;                 /* 回滚：列表与本地数据保持一致 */
+    showToast('存储空间不足，请删除部分旧表情包后再试');
+    if (currentRoute && currentRoute.page === 'sub' && currentRoute.name === 'stickers') renderStickersPage();
+    return false;
+  }
+}
+
+/* 批量导入主流程：逐张读取并压缩（最大边 200px / JPEG 0.7），全部完成后统一入库 */
+async function importStickerFiles(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  showStickerLoading('正在批量导入表情包...');
+  const added = [];
+  for (let i = 0; i < list.length; i++) {   /* 串行 for + await：绝不同时压缩多张，避免浏览器卡死 */
+    const file = list[i];
+    if (!/^image\//.test(file.type)) continue;
+    const data = await compressImageAsync(file, 200);
+    if (!data) continue;
+    const rawName = String(file.name || '').replace(/\.(png|jpg|jpeg|gif|webp|bmp|heic)$/i, '').trim();
+    const name = (rawName || '表情').slice(0, 20);
+    added.push({ id: uid(), name, data, ts: Date.now() });
+  }
+  hideStickerLoading();
+  if (!added.length) {
+    showToast('没有可导入的图片');
+    return;
+  }
+  const ok = await saveStickerBatch(added);
+  if (!ok) return;                          /* 失败提示已在保存函数内给出 */
+  if (currentRoute && currentRoute.page === 'sub' && currentRoute.name === 'stickers') renderStickersPage();
+  showToast(`成功导入了 ${added.length} 张表情包`);
 }
 
 function openStickerEditor(id) {
@@ -13672,7 +13797,7 @@ let readingExpanded = false;      /* 悬浮小聊天框是否展开 */
 let readingQuote = null;          /* 当前引用：{ text, who } */
 let readingSelText = '';          /* 情绪卡：长按选中的书中文字 */
 let readingDragState = null;      /* 悬浮窗拖拽状态 */
-let readingRingRange = 'day';     /* 环形统计范围：day / week / month */
+let readingRingRange = 'day';     /* 环形统计范围：day / week / all（全部 = 累加所有历史记录） */
 let readingQuoteTimer = null;     /* 松手后的 150ms 延时，等浏览器把选区稳定下来 */
 let rdLastEmotionTapAt = 0;       /* 触屏 touchend 已处理过的标记，防止 click 再触发一次 */
 
@@ -13817,18 +13942,26 @@ function renderReadTogetherPage() {
 
 /* ---------- 【一起读书】主界面 ---------- */
 function rdStatsOf(range) {
+  let together = 0, alone = 0;
+  /* 【全部】：不做任何日期过滤，直接遍历存储里的所有阅读记录并分别累加 */
+  if (range === 'all') {
+    const all = (state.readData && state.readData.stats) || {};
+    Object.keys(all).forEach(k => {
+      const v = all[k];
+      if (!v) return;
+      together += Number(v.together) || 0;
+      alone += Number(v.alone) || 0;
+    });
+    return { together, alone };
+  }
+  /* 【日】/【周】：沿用原有的日期范围过滤 */
   let keys = [];
   const now = new Date();
   if (range === 'week') {
     for (let i = 6; i >= 0; i--) keys.push(rdDateKey(new Date(now.getTime() - i * 86400000)));
-  } else if (range === 'month') {
-    const y = now.getFullYear(), m = now.getMonth();
-    const days = new Date(y, m + 1, 0).getDate();
-    for (let i = 1; i <= days; i++) keys.push(y + '-' + pad2(m + 1) + '-' + pad2(i));
   } else {
     keys = [todayKey()];
   }
-  let together = 0, alone = 0;
   keys.forEach(k => {
     const v = state.readData.stats[k];
     if (!v) return;
@@ -13871,7 +14004,7 @@ function renderReadingPage() {
       <div class="rd-range-tabs">
         <button class="${readingRingRange === 'day' ? 'active' : ''}" data-rd-range="day">日</button>
         <button class="${readingRingRange === 'week' ? 'active' : ''}" data-rd-range="week">周</button>
-        <button class="${readingRingRange === 'month' ? 'active' : ''}" data-rd-range="month">月</button>
+        <button class="${readingRingRange === 'all' ? 'active' : ''}" data-rd-range="all">全部</button>
       </div>
     </div>
     <div class="panel rd-shelf-panel">
@@ -14906,6 +15039,237 @@ function rdBindGlobal() {
 
 
 /* =========================================================
+ * 二十四·一、离线消息补发提示横幅
+ * 极简两行纯文本：离线期间 TA 的新消息数 / 已超时的待办与提醒数；
+ * 页面加载（DOMContentLoaded）与切回前台时结算一次，4 秒后自动滑出；
+ * 点击横幅会关掉横幅并跳到对应页面（有未读消息 → 消息列表；只有超时待办 → 待办页）
+ * ========================================================= */
+let welcomeBannerTimer = null;
+let welcomeBannerHideTimer = null;
+/* 横幅点击的目标页：messages 消息列表 / todo 待办页面，空字符串表示无处可跳 */
+let welcomeBannerTarget = '';
+
+/* 显示横幅：先落文本再滑入，保证从顶部平滑进入 */
+function welcomeBannerShow(html) {
+  const el = $('#welcome-banner');
+  if (!el) return;
+  clearTimeout(welcomeBannerTimer);
+  clearTimeout(welcomeBannerHideTimer);
+  el.innerHTML = html;
+  el.style.display = 'block';
+  void el.offsetHeight;                 /* 强制一次重排，让 -100% 初始态生效，滑入才有动画 */
+  el.classList.add('show');
+  welcomeBannerTimer = setTimeout(welcomeBannerHide, 4000);   /* 显示 4 秒后自动滑出 */
+}
+
+/* 隐藏横幅：先播放滑出动画，动画结束再彻底隐藏并清空文本 */
+function welcomeBannerHide() {
+  const el = $('#welcome-banner');
+  clearTimeout(welcomeBannerTimer);
+  welcomeBannerTimer = null;
+  if (!el) return;
+  el.classList.remove('show');
+  clearTimeout(welcomeBannerHideTimer);
+  welcomeBannerHideTimer = setTimeout(() => {
+    /* 期间又被新横幅唤出时不要误隐藏 */
+    if (!el.classList.contains('show')) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+      welcomeBannerTarget = '';
+    }
+  }, 300);
+}
+
+/* 点击横幅：先读取要跳转的目标（点具体那行优先，否则用主目标），
+ * 立刻关闭横幅，再打开消息列表或待办页面 */
+function welcomeBannerClick(e) {
+  const line = e.target && e.target.closest ? e.target.closest('[data-wbt]') : null;
+  const target = (line && line.dataset.wbt) || welcomeBannerTarget;
+  welcomeBannerHide();
+  if (target === 'messages') switchTab('messages');
+  else if (target === 'todo') navigate({ page: 'sub', name: 'todo' });
+}
+
+/* 记录「离开页面」的时间：切后台 / 关闭页面时调用，回前台时据此结算离线事件 */
+function markOfflineStart() {
+  if (!state) return;
+  state.lastSeenAt = Date.now();
+  persist(true);
+}
+
+/* 日常提醒的时刻：YYYY-MM-DD + HH:MM → 本地毫秒时间戳（无时间按 09:00，与待办一致） */
+function welcomeReminderTs(dateKey, timeStr) {
+  const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateKey || ''));
+  if (!dm) return 0;
+  const tm = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr || ''));
+  const hh = tm ? Number(tm[1]) : 9;
+  const mm = tm ? Number(tm[2]) : 0;
+  return new Date(Number(dm[1]), Number(dm[2]) - 1, Number(dm[3]), hh, mm, 0, 0).getTime();
+}
+
+/* 离线窗口内已到点的日常提醒条数：
+ * 从离开当天逐日检查到 today，只有提醒时刻落在 (seenAt, now] 才算「错过」；
+ * 最多回溯 31 天，防止异常时间戳造成超大循环 */
+function welcomeMissedReminderCount(seenAt, now) {
+  const list = Array.isArray(state.dailyReminders) ? state.dailyReminders : [];
+  if (!list.length || !(seenAt > 0)) return 0;
+  const start = new Date(seenAt);
+  const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const today = new Date();
+  const todayMid = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const DAY = 86400000;
+  let count = 0;
+  for (let i = 0; i < 31; i++) {
+    const ms = cursor.getTime() + i * DAY;
+    if (ms > todayMid) break;
+    const d = new Date(ms);
+    const key = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    list.forEach(r => {
+      if (!r || !reminderActiveOn(r, key)) return;
+      const ts = welcomeReminderTs(key, r.time);
+      if (ts > seenAt && ts <= now) count++;
+    });
+  }
+  return count;
+}
+
+/* 结算离线期间事件并显示横幅：
+ * unreadMsgCount  = 这段时间内 TA（role:'dream'）新产生的消息条数（撤回的不算）
+ * overdueTodoCount = 这段时间内到期且仍未完成的待办 + 这段时间内错过的日常提醒
+ * 两者都为 0 时不显示横幅 */
+function checkOfflineEvents() {
+  if (!state) return;
+  const el = $('#welcome-banner');
+  if (!el) return;
+  const now = Date.now();
+  const seenAt = Number(state.lastSeenAt) || 0;
+  /* 第一次运行 / 没有上次离开记录：只记录起点，不弹横幅 */
+  if (!(seenAt > 0)) {
+    state.lastSeenAt = now;
+    persist();
+    return;
+  }
+
+  /* ① TA 在离线期间生成的新消息（按真实字段 role:'dream' 判定） */
+  let unreadMsgCount = 0;
+  (state.roles || []).forEach(r => {
+    const list = state.chats && state.chats[r.id];
+    if (!Array.isArray(list)) return;
+    list.forEach(m => {
+      if (!m || m.recalled) return;
+      if (m.role !== 'dream') return;
+      const ts = Number(m.ts) || 0;
+      if (ts > seenAt && ts <= now) unreadMsgCount++;
+    });
+  });
+
+  /* ② 这段时间内到点、仍未完成的待办 */
+  let overdueTodoCount = 0;
+  (state.todos || []).forEach(t => {
+    if (!t || t.isCompleted) return;
+    const ts = Number(t.remindTime) || 0;
+    if (ts > seenAt && ts <= now) overdueTodoCount++;
+  });
+  /* ③ 这段时间内错过的日常提醒 */
+  overdueTodoCount += welcomeMissedReminderCount(seenAt, now);
+
+  /* 结算完毕：更新离开时间，避免下一次切前台重复统计同一条消息 */
+  state.lastSeenAt = now;
+  persist();
+
+  if (unreadMsgCount <= 0 && overdueTodoCount <= 0) {
+    welcomeBannerHide();
+    return;
+  }
+  /* 两行各自标注点击目标：点「消息未读」→ 消息列表，点「待办已超时」→ 待办页；
+   * 没点中具体行时用主目标（有未读先看消息，否则看待办） */
+  const lines = [];
+  if (unreadMsgCount > 0) lines.push(`<span data-wbt="messages">你有 ${unreadMsgCount} 条消息未读</span>`);
+  if (overdueTodoCount > 0) lines.push(`<span data-wbt="todo">${overdueTodoCount} 个待办已超时</span>`);
+  welcomeBannerTarget = unreadMsgCount > 0 ? 'messages' : 'todo';
+  welcomeBannerShow(lines.join('<br>'));
+}
+
+/* =========================================================
+ * 二十四·二、单击头像查看 TA 心声胶囊
+ * 触发入口：聊天页顶部头像 + 每条 TA 消息气泡旁的头像（均走 250ms 单击/双击判定）；
+ * 单击 → 随机取 3 个不同情绪大类，各抽 1 个词，三色胶囊竖向排列；
+ * 双击 → 仍走原有的拍一拍逻辑
+ * ========================================================= */
+const emotionCategories = {
+  sweet: {
+    name: "甜蜜心动", color: "#FF6B81", bg: "rgba(255, 107, 129, 0.15)",
+    words: ["心动", "超想你", "小鹿乱撞", "满心欢喜", "被治愈了", "极致温柔", "满眼是你", "心软软", "疯狂心动", "怦然心动", "为你着迷"]
+  },
+  jealous: {
+    name: "傲娇吃醋", color: "#FF8C00", bg: "rgba(255, 140, 0, 0.15)",
+    words: ["偷偷吃醋", "委屈巴巴", "有点生气", "不想理你", "假装高冷", "想被哄", "占有欲", "患得患失", "极度黏人", "暗自赌气", "酸溜溜的", "傲娇中"]
+  },
+  emo: {
+    name: "低落疲惫", color: "#6A5ACD", bg: "rgba(106, 90, 205, 0.15)",
+    words: ["有点疲惫", "独自emo", "需要充电", "有点烦躁", "无精打采", "想静静", "放空中", "有点迷茫", "脑袋空空"]
+  },
+  focus: {
+    name: "专注日常", color: "#3CB371", bg: "rgba(60, 179, 113, 0.15)",
+    words: ["极度认真", "在忙勿扰", "专心致志", "发呆中", "偷得浮生", "听歌中", "懒洋洋", "想睡觉", "无聊中", "精神内耗"]
+  },
+  dark: {
+    name: "腹黑暧昧", color: "#8A2BE2", bg: "rgba(138, 43, 226, 0.15)",
+    words: ["胡思乱想", "被拿捏了", "毫无防备", "视线锁定", "想把你藏起", "暗自窃喜", "图谋不轨", "想入非非", "蓄谋已久"]
+  }
+};
+
+/* 头像来源：梦角资料里的 avatar 可能是 Base64 / 图片链接，也可能只是 Emoji；
+ * 统一转成 <img> 可用的 src（Emoji 用 SVG 包一层，避免空 src 出现裂图） */
+function taStatusAvatarSrc(role) {
+  const v = role && role.avatar ? String(role.avatar) : '🌙';
+  if (/^(data:image|https?:|blob:)/.test(v)) return v;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">` +
+    `<rect width="80" height="80" fill="#eef2f7"/>` +
+    `<text x="40" y="54" font-size="40" text-anchor="middle">${esc(v)}</text></svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+/* 打开卡片：打乱全部情绪大类后取前 3 个（三个词绝不同组），
+ * 每个分类各抽 1 个词，分别注入该分类的文字色 / 背景色 */
+function showTaStatusCard(roleId) {
+  const card = $('#ta-status-card');
+  if (!card) return;
+  /* 头像取自当前梦角资料 */
+  const role = roleById(roleId) || (state.roles && state.roles[0]) || null;
+  const avaImg = $('#status-avatar');
+  if (avaImg) {
+    /* 图片链接失效时兜底显示默认头像，避免出现裂图 */
+    avaImg.onerror = () => { avaImg.onerror = null; avaImg.src = taStatusAvatarSrc(null); };
+    avaImg.src = taStatusAvatarSrc(role);
+  }
+  const allKeys = Object.keys(emotionCategories);
+  const keys = pickMany(allKeys, Math.min(3, allKeys.length));
+  const box = $('#status-tags-container');
+  if (box) {
+    box.innerHTML = keys.map(key => {
+      const cat = emotionCategories[key];
+      const word = pickOne(cat.words || []);
+      return `<span class="status-capsule" style="color:${cat.color};background:${cat.bg};">${esc(word)}</span>`;
+    }).join('');
+  }
+  card.style.display = 'block';
+  void card.offsetHeight;               /* 强制重排，保证从 scale(.92) 平滑放大到 1 */
+  card.classList.add('show');
+}
+
+/* 关闭卡片：只有点右上角 × 才关闭，弹出后不自动消失 */
+function hideTaStatusCard() {
+  const card = $('#ta-status-card');
+  if (!card) return;
+  card.classList.remove('show');
+  setTimeout(() => {
+    /* 期间又被重新打开时不要误隐藏 */
+    if (!card.classList.contains('show')) card.style.display = 'none';
+  }, 240);
+}
+
+/* =========================================================
  * 二十四、启动与全局事件
  * ========================================================= */
 function bindGlobalEvents() {
@@ -14928,10 +15292,28 @@ function bindGlobalEvents() {
   const stickerSheetEl = document.getElementById('stickerSheet');
   if (stickerSheetEl) stickerSheetEl.addEventListener('click', e => e.stopPropagation());
   bindCallMiniDrag();
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) persist(true);
+  /* 点击离线提示横幅：关闭横幅并跳转到消息列表 / 待办页面 */
+  const welcomeEl = document.getElementById('welcome-banner');
+  if (welcomeEl) welcomeEl.addEventListener('click', welcomeBannerClick);
+  /* 心声胶囊右上角 ×：必须 stopPropagation，避免冒泡触发页面其它点击逻辑 */
+  const closeStatusBtn = document.getElementById('close-status-btn');
+  if (closeStatusBtn) closeStatusBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    hideTaStatusCard();
   });
-  window.addEventListener('beforeunload', () => persist(true));
+  /* 表情包批量导入：常驻多选输入框的 change 只绑一次，避免页面重渲染后重复监听 */
+  const stickerBatchInput = document.getElementById('stickerBatchInput');
+  if (stickerBatchInput) stickerBatchInput.addEventListener('change', () => {
+    const files = Array.from(stickerBatchInput.files || []);
+    stickerBatchInput.value = '';            /* 立即清空，允许下次再选同一批文件 */
+    if (files.length) importStickerFiles(files);
+  });
+  document.addEventListener('visibilitychange', () => {
+    /* 切后台时记录离开时间；关闭页面时同样记录，供下次打开结算离线事件 */
+    if (document.hidden) markOfflineStart();
+    else persist(true);
+  });
+  window.addEventListener('beforeunload', () => markOfflineStart());
   document.addEventListener('click', () => {
     const ctx = getAudioCtx();
     if (ctx && ctx.state === 'suspended') ctx.resume();
@@ -14993,6 +15375,8 @@ async function boot() {
   checkTaSpacePosts();
   checkTaReadInvite();  /* 一起读书：TA 主动邀请共读 */
   checkTodoReminders(); /* 页面加载完成时立刻补查一次错过的待办提醒 */
+  /* 离线消息补发：结算上次离开后新产生的 TA 消息与超时待办，显示顶部纯文本横幅 */
+  checkOfflineEvents();
   /* 24h 退回检查：延迟到 UI 渲染与全部事件绑定完成之后执行，绝不阻塞基础交互 */
   setTimeout(() => { try { checkExpiredTransactions(); } catch (e) { /* 忽略 */ } }, 800);
   setInterval(() => {
@@ -15024,6 +15408,8 @@ async function boot() {
       checkTodoReminders(); /* 切后台期间错过的待办提醒，回前台立即补发 */
       checkLetterReplies(); /* 切后台期间到期的回信 */
       checkAutoLetters();   /* 时间戳已过期则立刻补发主动来信 */
+      /* 全部补查完成后再结算离线事件：这样补发出来的 TA 消息也会被计入横幅 */
+      checkOfflineEvents();
     }
     updateKeepAliveStatus();
   });

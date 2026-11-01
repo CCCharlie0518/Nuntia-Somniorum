@@ -15,6 +15,25 @@
 
 </head>
 <body>
+<!-- 离线消息补发提示横幅：默认隐藏，由 app.js 的 checkOfflineEvents() 填入纯文本并滑入 -->
+<div id="welcome-banner" class="welcome-banner" style="display: none;"></div>
+<!-- 单击 TA 头像（顶部或气泡旁）弹出的「心声胶囊」卡片：标题 + 分割线 + 头像 + 横向胶囊 -->
+<div id="ta-status-card" class="ta-status-card" style="display: none;">
+  <!-- 顶部标题区 -->
+  <div class="status-header">
+    <span class="status-title">心声</span>
+    <span id="close-status-btn" class="close-status-btn">×</span>
+  </div>
+
+  <!-- 分割线 -->
+  <div class="status-divider"></div>
+
+  <!-- 内容区：头像 + 胶囊 -->
+  <div class="status-content">
+    <img id="status-avatar" class="status-avatar" src="" alt="avatar">
+    <div id="status-tags-container" class="status-tags-container"></div>
+  </div>
+</div>
 <div id="app">
   <div id="viewport">
     <section class="page active" id="page-home"></section>
@@ -47,6 +66,8 @@
 </div>
 <div id="modalRoot"></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
+<!-- 表情包批量导入：多选图片输入框（常驻，避免页面重渲染后丢失监听） -->
+<input type="file" id="stickerBatchInput" accept="image/*" multiple style="display:none">
 
 <!-- 检查更新：二次确认弹窗（默认隐藏，层级高于全部既有浮层，由 app.js 打开/关闭） -->
 <div class="upd-mask hidden" id="updateConfirmMask">
